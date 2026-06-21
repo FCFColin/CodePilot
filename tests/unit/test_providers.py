@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 import httpx
+import openai
 import pytest
 import respx
 from pydantic import SecretStr
@@ -91,6 +92,76 @@ def _json_response(data: dict[str, Any]) -> httpx.Response:
         json=data,
         headers={"content-type": "application/json"},
     )
+
+
+class _MockStreamChunk:
+    """模拟 OpenAI 流式 chunk 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    @property
+    def usage(self) -> Any:
+        return self._data.get("usage")
+
+    @property
+    def choices(self) -> list[Any]:
+        return self._data.get("choices", [])
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name)
+
+
+class _MockStreamDelta:
+    """模拟 delta 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    @property
+    def content(self) -> str | None:
+        return self._data.get("content")
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name)
+
+
+class _MockStreamChoice:
+    """模拟 choice 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+        delta_data = data.get("delta", {})
+        self.delta = _MockStreamDelta(delta_data)
+
+    @property
+    def finish_reason(self) -> str | None:
+        return self._data.get("finish_reason")
+
+
+class _MockStreamResponse:
+    """模拟流式响应异步迭代器。"""
+
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self._chunks = chunks
+
+    def __aiter__(self) -> _MockStreamResponse:
+        return self
+
+    async def __anext__(self) -> _MockStreamChunk:
+        if not self._chunks:
+            raise StopAsyncIteration
+        chunk_data = self._chunks.pop(0)
+        chunk = _MockStreamChunk(chunk_data)
+        # 替换 choices 中的 dict 为 _MockStreamChoice
+        raw_choices = chunk_data.get("choices", [])
+        chunk._data["choices"] = [_MockStreamChoice(c) for c in raw_choices]
+        return chunk
+
+
+def _mock_stream_response(chunks: list[dict[str, Any]]) -> _MockStreamResponse:
+    """构造模拟的流式响应对象。"""
+    return _MockStreamResponse(chunks)
 
 
 # ============================================================================
@@ -728,6 +799,89 @@ class TestErrorHandling:
             provider = DeepSeekProvider(_deepseek_config())
             with pytest.raises(ProviderError, match="DeepSeek"):
                 await _collect(provider.chat([Message(role="user", content="hi")]))
+
+    async def test_deepseek_stream_options_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stream_options 不被支持时回退移除该参数并重试成功。"""
+
+        provider = DeepSeekProvider(_deepseek_config())
+
+        # 构造成功的流式响应
+        chunks = [
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"content": "OK"}, "finish_reason": None}
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+
+        call_count = 0
+
+        async def _mock_create_completion(**kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # 第一次调用：带 stream_options，抛出 APIError
+                assert "stream_options" in kwargs
+                raise openai.APIError(
+                    message="stream_options not supported",
+                    request=None,
+                    body=None,
+                )
+            # 第二次调用：不带 stream_options，返回成功
+            assert "stream_options" not in kwargs
+            return _mock_stream_response(chunks)
+
+        # 直接 mock _create_completion，绕过 tenacity 重试
+        monkeypatch.setattr(
+            provider, "_create_completion", _mock_create_completion
+        )
+
+        events = await _collect(
+            provider.chat([Message(role="user", content="hi")])
+        )
+        # 验证回退成功
+        assert call_count == 2
+        assert isinstance(events[0], TextDelta)
+        assert events[0].text == "OK"
+        assert isinstance(events[-1], Done)
+
+    async def test_deepseek_stream_options_fallback_both_fail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stream_options 回退后仍然失败时抛出 ProviderError。"""
+
+        provider = DeepSeekProvider(_deepseek_config())
+
+        call_count = 0
+
+        async def _mock_create_completion(**kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            raise openai.APIError(
+                message=f"error on call {call_count}",
+                request=None,
+                body=None,
+            )
+
+        # 直接 mock _create_completion，绕过 tenacity 重试
+        monkeypatch.setattr(
+            provider, "_create_completion", _mock_create_completion
+        )
+
+        with pytest.raises(ProviderError, match="DeepSeek"):
+            await _collect(
+                provider.chat([Message(role="user", content="hi")])
+            )
+        assert call_count == 2
 
     async def test_anthropic_api_error_raises_provider_error(
         self, monkeypatch: pytest.MonkeyPatch

@@ -99,6 +99,33 @@ class TestDisplayManager:
         assert display._current_text == "Hello World"
         await display.on_turn_end()
 
+    async def test_on_text_delta_non_tty_accumulates(self) -> None:
+        """非 TTY 模式下 on_text_delta 只累积不启动 Live。"""
+        display, output = _make_display()
+        assert display._is_tty is False
+        await display.on_text_delta("Hello")
+        await display.on_text_delta(" World")
+        # 非 TTY 模式下 Live 不应启动
+        assert display._live is None
+        # 文本应已累积
+        assert display._current_text == "Hello World"
+        # 尚未输出任何内容
+        result = output.getvalue()
+        assert "Hello" not in result
+
+    async def test_on_text_delta_non_tty_stop_live_prints(self) -> None:
+        """非 TTY 模式下累积文本后 _stop_live 一次性打印完整面板。"""
+        display, output = _make_display()
+        assert display._is_tty is False
+        await display.on_text_delta("Accumulated text")
+        # Live 从未启动，_stop_live 应打印完整面板
+        display._stop_live()
+        result = output.getvalue()
+        assert "Accumulated text" in result
+        assert "Assistant" in result
+        # 状态应已清理
+        assert display._current_text == ""
+
     async def test_on_thinking_delta(self) -> None:
         """on_thinking_delta 累积思考内容到 _current_thinking。"""
         display, _ = _make_display(show_thinking=True)
@@ -106,8 +133,9 @@ class TestDisplayManager:
         assert display._current_thinking == "思考中..."
         await display.on_thinking_delta("继续思考")
         assert display._current_thinking == "思考中...继续思考"
-        # Live 应已启动
-        assert display._live is not None
+        # 非 TTY 环境下 Live 不启动；TTY 环境下 Live 应启动
+        if display._is_tty:
+            assert display._live is not None
         await display.on_turn_end()
 
     async def test_on_thinking_delta_disabled(self) -> None:
@@ -195,6 +223,9 @@ class TestDisplayManager:
             show_cost_estimate=True,
         )
         await display.on_usage(100, 50)
+        # 非 TTY 模式下 usage 延迟到 on_turn_end 打印
+        if not display._is_tty:
+            await display.on_turn_end()
         result = output.getvalue()
         assert "Input" in result
         assert "100" in result
@@ -207,6 +238,9 @@ class TestDisplayManager:
             show_token_usage=True,
         )
         await display.on_usage(100, 50)
+        # 非 TTY 模式下 usage 延迟到 on_turn_end 打印
+        if not display._is_tty:
+            await display.on_turn_end()
         result = output.getvalue()
         assert "Input" in result
 
@@ -214,8 +248,22 @@ class TestDisplayManager:
         """show_token_usage=False 时不输出用量面板。"""
         display, output = _make_display(show_token_usage=False)
         await display.on_usage(100, 50)
+        await display.on_turn_end()
         result = output.getvalue()
         assert "Input" not in result
+
+    async def test_on_usage_non_tty_deferred(self) -> None:
+        """非 TTY 模式下 on_usage 延迟到 on_turn_end 打印。"""
+        display, output = _make_display(show_token_usage=True)
+        assert display._is_tty is False
+        await display.on_usage(100, 50)
+        # on_usage 后不应立即打印
+        result_after_usage = output.getvalue()
+        assert "Input" not in result_after_usage
+        # on_turn_end 后才打印
+        await display.on_turn_end()
+        result_after_turn_end = output.getvalue()
+        assert "Input" in result_after_turn_end
 
     async def test_on_error(self) -> None:
         """on_error 输出错误面板。"""
@@ -229,9 +277,11 @@ class TestDisplayManager:
         """on_turn_end 停止 Live 并清理状态。"""
         display, _ = _make_display()
         await display.on_text_delta("text")
-        assert display._live is not None
+        # 非 TTY 环境下 Live 不启动，但 _current_text 应已累积
+        assert display._current_text == "text"
         await display.on_turn_end()
         assert display._live is None
+        assert display._current_text == ""
 
     def test_show_help(self) -> None:
         """show_help 输出帮助信息。"""

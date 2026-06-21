@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import builtins
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -191,6 +192,16 @@ class TestApp:
         result = await app._handle_slash_command("/compact")
         assert result is False
 
+    async def test_slash_compact_error(self, tmp_path: Path) -> None:
+        """/compact 命令压缩失败时显示错误。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.context_manager.force_compress = AsyncMock(
+            side_effect=CodePilotError("compression failed")
+        )
+        result = await app._handle_slash_command("/compact")
+        assert result is False
+
     async def test_slash_history(self, tmp_path: Path) -> None:
         """/history 命令返回 False 且不退出。"""
         config = _make_config(tmp_path)
@@ -214,6 +225,14 @@ class TestApp:
         assert result is False
         assert config.deepseek.model == "new-model-name"
         assert config.deepseek.model != original_model
+
+    async def test_slash_model_with_arg_anthropic(self, tmp_path: Path) -> None:
+        """/model 带参数时切换 anthropic 模型。"""
+        config = _make_config(tmp_path, provider="anthropic")
+        app = App(config)
+        result = await app._handle_slash_command("/model claude-3-opus")
+        assert result is False
+        assert config.anthropic.model == "claude-3-opus"
 
     async def test_slash_provider_no_arg(self, tmp_path: Path) -> None:
         """/provider 无参数时显示当前 provider 并返回 False。"""
@@ -271,6 +290,19 @@ class TestApp:
         # 第二次：关闭 YOLO
         await app._handle_slash_command("/approve")
         assert app.approval._yolo_mode is False
+
+    async def test_slash_approve_toggle_restores_approval_list(self, tmp_path: Path) -> None:
+        """/approve 关闭 YOLO 时恢复默认审批列表。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 先清空审批列表，然后开启 YOLO
+        app.approval.require_approval_for = set()
+        await app._handle_slash_command("/approve")
+        assert app.approval._yolo_mode is True
+        # 关闭 YOLO，此时审批列表为空，应恢复默认
+        await app._handle_slash_command("/approve")
+        assert app.approval._yolo_mode is False
+        assert "file_write" in app.approval.require_approval_for
 
     async def test_slash_undo_empty(self, tmp_path: Path) -> None:
         """/undo 命令在空栈时返回 False。"""
@@ -415,6 +447,25 @@ class TestUndoTracker:
         assert "已恢复" in message
         assert file_path.read_text(encoding="utf-8") == "original"
 
+    def test_undo_os_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """撤销时遇到 OSError 返回失败。"""
+        tracker = UndoTracker()
+        file_path = tmp_path / "file.txt"
+        file_path.write_text("content", encoding="utf-8")
+        tracker._stack.append((str(file_path), "original"))
+
+        original_open = builtins.open
+
+        def _mock_open(*args: Any, **kwargs: Any) -> Any:
+            if len(args) > 0 and isinstance(args[0], str) and "file.txt" in args[0]:
+                raise OSError("permission denied")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", _mock_open)
+        success, message = tracker.undo()
+        assert success is False
+        assert "撤销失败" in message
+
     def test_undo_file_already_deleted(self, tmp_path: Path) -> None:
         """撤销新建文件但文件已不存在时返回成功。"""
         tracker = UndoTracker()
@@ -446,6 +497,23 @@ class TestUndoTracker:
         file_path.write_text("hello world", encoding="utf-8")
         result = tracker._read_file(str(file_path))
         assert result == "hello world"
+
+    def test_read_file_os_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_read_file 遇到 OSError 返回 None。"""
+        tracker = UndoTracker()
+        file_path = tmp_path / "file.txt"
+        file_path.write_text("content", encoding="utf-8")
+
+        original_open = builtins.open
+
+        def _mock_open(*args: Any, **kwargs: Any) -> Any:
+            if len(args) > 0 and isinstance(args[0], str) and "file.txt" in args[0]:
+                raise OSError("permission denied")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", _mock_open)
+        result = tracker._read_file(str(file_path))
+        assert result is None
 
 
 # ============================================================================
@@ -607,6 +675,38 @@ class TestSessionIntegration:
         result = await app._handle_slash_command("/export xml")
         assert result is False
 
+    async def test_slash_export_get_record_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/export 获取会话记录失败时显示错误。"""
+        monkeypatch.chdir(tmp_path)
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.session_manager.get_record = MagicMock(
+            side_effect=RuntimeError("record error")
+        )
+        result = await app._handle_slash_command("/export")
+        assert result is False
+
+    async def test_slash_export_os_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/export 写文件失败时显示错误。"""
+        monkeypatch.chdir(tmp_path)
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.session_manager.add_message("user", "test")
+
+        # Mock Path.write_text to raise OSError
+        original_write_text = Path.write_text
+
+        def _mock_write_text(self_path: Any, *args: Any, **kwargs: Any) -> Any:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_text", _mock_write_text)
+        result = await app._handle_slash_command("/export")
+        assert result is False
+
     async def test_resume_from_history_no_sessions(self, tmp_path: Path) -> None:
         """无历史会话时 resume_from_history 返回 False。"""
         # 使用空目录的 storage
@@ -654,3 +754,202 @@ class TestSessionIntegration:
         app = App(config)
         result = await app.resume_from_history("nonexistent-id-9999")
         assert result is False
+
+    async def test_resume_from_history_empty_messages(self, tmp_path: Path) -> None:
+        """resume_from_history 加载无消息的会话返回 False。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 保存一个空会话
+        app.session_manager.save()
+        session_id = app.session_manager.get_record()["session_id"]
+
+        result = await app.resume_from_history(session_id)
+        assert result is False
+
+
+# ============================================================================
+# TestHookRegistry
+# ============================================================================
+
+
+class TestHookRegistry:
+    """_create_hook_registry 覆盖测试。"""
+
+    def test_hook_registry_with_auto_lint(self, tmp_path: Path) -> None:
+        """auto_lint=True 时注册 LintHook。"""
+        config = _make_config(tmp_path)
+        config.hooks.auto_lint = True
+        config.hooks.auto_git_commit = False
+        app = App(config)
+        # hook_registry 应包含一个 LintHook
+        assert len(app.hook_registry._hooks) >= 1
+        hook_names = [h.name() for h in app.hook_registry._hooks]
+        assert "auto_lint" in hook_names
+
+    def test_hook_registry_with_auto_git_commit(self, tmp_path: Path) -> None:
+        """auto_git_commit=True 且 git.auto_commit=True 时注册 GitCommitHook。"""
+        config = _make_config(tmp_path)
+        config.hooks.auto_lint = False
+        config.hooks.auto_git_commit = True
+        config.git.auto_commit = True
+        app = App(config)
+        hook_names = [h.name() for h in app.hook_registry._hooks]
+        assert "auto_git_commit" in hook_names
+
+    def test_hook_registry_no_git_commit_when_disabled(self, tmp_path: Path) -> None:
+        """auto_git_commit=True 但 git.auto_commit=False 时不注册 GitCommitHook。"""
+        config = _make_config(tmp_path)
+        config.hooks.auto_lint = False
+        config.hooks.auto_git_commit = True
+        config.git.auto_commit = False
+        app = App(config)
+        hook_names = [h.name() for h in app.hook_registry._hooks]
+        assert "auto_git_commit" not in hook_names
+
+    def test_hook_registry_both_disabled(self, tmp_path: Path) -> None:
+        """auto_lint=False 且 auto_git_commit=False 时无 Hook 注册。"""
+        config = _make_config(tmp_path)
+        config.hooks.auto_lint = False
+        config.hooks.auto_git_commit = False
+        app = App(config)
+        assert len(app.hook_registry._hooks) == 0
+
+    def test_hook_registry_both_enabled(self, tmp_path: Path) -> None:
+        """auto_lint=True 且 auto_git_commit=True + git.auto_commit=True 时两个 Hook 都注册。"""
+        config = _make_config(tmp_path)
+        config.hooks.auto_lint = True
+        config.hooks.auto_git_commit = True
+        config.git.auto_commit = True
+        app = App(config)
+        hook_names = [h.name() for h in app.hook_registry._hooks]
+        assert "auto_lint" in hook_names
+        assert "auto_git_commit" in hook_names
+
+
+# ============================================================================
+# TestRepoMapperCreation
+# ============================================================================
+
+
+class TestRepoMapperCreation:
+    """_create_repo_mapper 覆盖测试。"""
+
+    def test_repo_mapper_exception_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_create_repo_mapper 在 RepoMapper 构造异常时返回 None。"""
+        config = _make_config(tmp_path)
+        config.repomap.enabled = True
+
+        from codepilot import repomap as repomap_module
+
+        def _raise_error(**kwargs: Any) -> None:
+            raise RuntimeError("tree-sitter not available")
+
+        monkeypatch.setattr(repomap_module.RepoMapper, "__init__", _raise_error)
+        app = App(config)
+        assert app.repo_mapper is None
+
+    def test_repo_mapper_not_available_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_create_repo_mapper 在 is_available() 返回 False 时返回 None。"""
+        config = _make_config(tmp_path)
+        config.repomap.enabled = True
+
+        from codepilot import repomap as repomap_module
+
+        original_init = repomap_module.RepoMapper.__init__
+
+        def _mock_init(self: Any, **kwargs: Any) -> None:
+            original_init(self, **kwargs)
+
+        monkeypatch.setattr(repomap_module.RepoMapper, "is_available", lambda self: False)
+        app = App(config)
+        assert app.repo_mapper is None
+
+
+# ============================================================================
+# TestGitIntegration
+# ============================================================================
+
+
+class TestGitIntegration:
+    """Git 集成相关测试。"""
+
+    def test_git_manager_initialized(self, tmp_path: Path) -> None:
+        """App 初始化时创建 GitManager。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        assert app.git_manager is not None
+
+    def test_tracked_tool_wrapper_auto_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """TrackedToolWrapper 在 auto_commit 启用且 git 仓库中自动提交。"""
+        import subprocess
+
+        # 初始化 git 仓库
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "test"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+
+        config = _make_config(tmp_path)
+        config.git.auto_commit = True
+        app = App(config)
+
+        # 获取 write_file 工具（应为 TrackedToolWrapper）
+        write_tool = app.tool_registry.get("write_file")
+        assert isinstance(write_tool, TrackedToolWrapper)
+        assert write_tool._auto_commit_enabled is True
+
+    def test_tracked_tool_wrapper_no_auto_commit_when_disabled(
+        self, tmp_path: Path
+    ) -> None:
+        """TrackedToolWrapper 在 auto_commit 禁用时不自动提交。"""
+        config = _make_config(tmp_path)
+        config.git.auto_commit = False
+        app = App(config)
+
+        write_tool = app.tool_registry.get("write_file")
+        assert isinstance(write_tool, TrackedToolWrapper)
+        assert write_tool._auto_commit_enabled is False
+
+
+# ============================================================================
+# TestSessionManagerCreation
+# ============================================================================
+
+
+class TestSessionManagerCreation:
+    """Session 集成相关测试。"""
+
+    def test_session_manager_initialized(self, tmp_path: Path) -> None:
+        """App 初始化时创建 SessionManager 并开始新会话。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        assert app.session_manager is not None
+        assert app.session_storage is not None
+        assert app.session_exporter is not None
+
+    def test_session_manager_model_deepseek(self, tmp_path: Path) -> None:
+        """deepseek provider 时 session_manager 使用 deepseek model。"""
+        config = _make_config(tmp_path, provider="deepseek")
+        app = App(config)
+        assert app.session_manager.model == config.deepseek.model
+
+    def test_session_manager_model_anthropic(self, tmp_path: Path) -> None:
+        """anthropic provider 时 session_manager 使用 anthropic model。"""
+        config = _make_config(tmp_path, provider="anthropic")
+        app = App(config)
+        assert app.session_manager.model == config.anthropic.model

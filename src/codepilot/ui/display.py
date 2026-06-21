@@ -118,6 +118,7 @@ class DisplayManager:
         self.provider_name = provider_name
         self.context_manager = context_manager
         self.console = Console()
+        self._is_tty: bool = self.console.is_terminal
 
         # 流式文本累积状态
         self._live: Live | None = None
@@ -159,6 +160,9 @@ class DisplayManager:
                 with contextlib.suppress(Exception):
                     self._live.stop()
             self._live = None
+        elif self._current_text and not self._is_tty:
+            # 非 TTY 模式：Live 从未启动，一次性打印完整面板
+            self.console.print(self._build_assistant_panel())
         self._current_text = ""
         self._current_thinking = ""
         self._thinking_finalized = False
@@ -195,29 +199,31 @@ class DisplayManager:
 
     async def on_text_delta(self, text: str) -> None:
         """流式输出文本。用 rich.live.Live 实时更新 assistant 面板。"""
-        if self._live is None:
-            self._start_live()
         # 收到第一个 text delta 时固化 thinking
         if not self._thinking_finalized and self._current_thinking:
             self._thinking_finalized = True
         self._current_text += text
-        if self._live is not None:
-            with contextlib.suppress(Exception):
-                self._live.update(self._build_assistant_panel())
+        if self._is_tty:
+            # TTY 模式：用 Live 实时更新
+            if self._live is None:
+                self._start_live()
+            if self._live is not None:
+                with contextlib.suppress(Exception):
+                    self._live.update(self._build_assistant_panel())
 
     async def on_thinking_delta(self, text: str) -> None:
         """显示思考过程（灰色/暗色，斜体），累积到 Live 面板中。"""
         if not self.config.show_thinking:
             return
-        # 如果 Live 没运行，先启动 Live 面板（_start_live 会重置状态，所以先启动再累积）
-        if self._live is None:
-            self._start_live()
         # 累积 thinking 内容
         self._current_thinking += text
-        # 更新 Live 面板
-        if self._live is not None:
-            with contextlib.suppress(Exception):
-                self._live.update(self._build_assistant_panel())
+        if self._is_tty:
+            # TTY 模式：用 Live 实时更新
+            if self._live is None:
+                self._start_live()
+            if self._live is not None:
+                with contextlib.suppress(Exception):
+                    self._live.update(self._build_assistant_panel())
 
     async def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
         """显示工具调用面板（标题"工具调用"，显示工具名和参数）。"""
@@ -280,31 +286,37 @@ class DisplayManager:
 
     async def on_usage(self, input_tokens: int, output_tokens: int) -> None:
         """显示 token 用量底部状态栏。"""
-        self._stop_live()
-        if not self.config.show_token_usage:
-            return
-
-        # 累计用量
+        # 累计用量（始终更新，无论是否显示）
         self._cumulative_input += input_tokens
         self._cumulative_output += output_tokens
 
-        total_tokens = input_tokens + output_tokens
+        if not self.config.show_token_usage:
+            return
+
+        # 非 TTY 模式下延迟到 on_turn_end 统一显示，避免碎片化
+        if not self._is_tty:
+            return
+
+        self._stop_live()
+        self._print_usage_panel()
+
+    def _print_usage_panel(self) -> None:
+        """打印 token 用量面板。"""
+        cumulative_total = self._cumulative_input + self._cumulative_output
 
         # 从 context_manager 获取上下文占比
-        context_tokens = total_tokens
+        context_tokens = cumulative_total
         max_tokens = 0
         usage_percent = 0.0
         if self.context_manager is not None:
             try:
                 stats = self.context_manager.get_stats()
-                context_tokens = stats.get("total_tokens", total_tokens)
+                context_tokens = stats.get("total_tokens", cumulative_total)
                 max_tokens = stats.get("max_tokens", 0)
                 utilization = stats.get("utilization", 0.0)
                 usage_percent = utilization * 100
             except Exception:
                 pass
-
-        cumulative_total = self._cumulative_input + self._cumulative_output
 
         # 费用估算
         cost = 0.0
@@ -364,8 +376,12 @@ class DisplayManager:
         """单次 run 调用结束（无论正常/中断/错误）。
 
         停止 Live 流式显示，确保控制台状态干净。
+        非 TTY 模式下在此处统一打印累积的 token usage。
         """
         self._stop_live()
+        # 非 TTY 模式下延迟打印 token usage
+        if not self._is_tty and self.config.show_token_usage and self._cumulative_input + self._cumulative_output > 0:
+            self._print_usage_panel()
 
     # ------------------------------------------------------------------
     # 其他事件显示方法

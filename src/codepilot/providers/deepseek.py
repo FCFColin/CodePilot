@@ -51,10 +51,16 @@ class DeepSeekProvider(BaseProvider):
         self.config = config
         # 创建异步 OpenAI 客户端，base_url 指向 DeepSeek 兼容端点
         # max_retries=0 禁用 SDK 内置重试，由 tenacity 统一管理重试
+        logger.debug(
+            "DeepSeek Provider 初始化",
+            base_url=config.base_url,
+            model=config.model,
+        )
         self.client = AsyncOpenAI(
             api_key=config.api_key.get_secret_value(),
             base_url=config.base_url,
             max_retries=0,
+            timeout=60.0,
         )
 
     async def chat(
@@ -90,6 +96,7 @@ class DeepSeekProvider(BaseProvider):
             kwargs["tools"] = tools
 
         # 流式响应启用 usage 上报
+        # 注意：部分兼容端点不支持 stream_options，若请求失败则不带此参数重试
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
 
@@ -106,11 +113,25 @@ class DeepSeekProvider(BaseProvider):
         )
 
         # 发起请求（带重试），失败包装为 ProviderError
+        # 部分兼容端点不支持 stream_options，若失败则去掉此参数重试
         try:
             response = await self._create_completion(**kwargs)
         except openai.APIError as e:
-            logger.error("DeepSeek API 调用失败", error=str(e))
-            raise ProviderError(f"DeepSeek API 调用失败: {e}") from e
+            # 若含 stream_options 且失败，尝试不带 stream_options 重试
+            if "stream_options" in kwargs and stream:
+                logger.warning(
+                    "stream_options 不被支持，去掉后重试",
+                    error=str(e),
+                )
+                kwargs_fallback = {k: v for k, v in kwargs.items() if k != "stream_options"}
+                try:
+                    response = await self._create_completion(**kwargs_fallback)
+                except openai.APIError as e2:
+                    logger.error("DeepSeek API 调用失败", error=str(e2))
+                    raise ProviderError(f"DeepSeek API 调用失败: {e2}") from e2
+            else:
+                logger.error("DeepSeek API 调用失败", error=str(e))
+                raise ProviderError(f"DeepSeek API 调用失败: {e}") from e
 
         # 解析响应
         if stream:
