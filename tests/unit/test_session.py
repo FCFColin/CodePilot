@@ -198,6 +198,113 @@ class TestSessionManager:
         assert isinstance(tc["timestamp"], str)
         assert "T" in tc["timestamp"]
 
+    def test_session_manager_add_thinking(self, tmp_path: Path) -> None:
+        """add_thinking 后 save 再 load，thinking 内容完整。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        manager = SessionManager(
+            storage=storage,
+            provider="deepseek",
+            model="astron-code-latest",
+            workspace_root=tmp_path,
+        )
+        session_id = manager.start_session()
+        manager.add_message("assistant", "回答内容")
+        manager.add_thinking("深度思考过程")
+        manager.save()
+
+        loaded = storage.load(session_id)
+        msgs = loaded["messages"]
+        assert len(msgs) == 1
+        assert msgs[0]["thinking"] == "深度思考过程"
+
+    def test_session_manager_add_thinking_no_assistant(self, tmp_path: Path) -> None:
+        """没有 assistant 消息时 add_thinking 自动创建。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        manager = SessionManager(
+            storage=storage,
+            provider="deepseek",
+            model="astron-code-latest",
+            workspace_root=tmp_path,
+        )
+        session_id = manager.start_session()
+        manager.add_thinking("独立思考")
+        manager.save()
+
+        loaded = storage.load(session_id)
+        msgs = loaded["messages"]
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0]["thinking"] == "独立思考"
+        assert msgs[0]["content"] == ""
+
+    def test_session_auto_export_log(self, tmp_path: Path) -> None:
+        """save 后工作目录存在 codepilot-log-{session_id}.md 文件。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        manager = SessionManager(
+            storage=storage,
+            provider="deepseek",
+            model="astron-code-latest",
+            workspace_root=tmp_path,
+        )
+        session_id = manager.start_session()
+        manager.add_message("user", "hello")
+        manager.save()
+
+        log_path = tmp_path / f"codepilot-log-{session_id}.md"
+        assert log_path.exists()
+        content = log_path.read_text(encoding="utf-8")
+        assert "hello" in content
+
+    def test_session_auto_export_log_failure_silent(self, tmp_path: Path) -> None:
+        """workspace_root 不可写时 _auto_export_log 不抛异常。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        # 使用一个不存在的深层路径作为 workspace_root，写入会失败
+        bad_root = tmp_path / "nonexistent" / "deep" / "path"
+        manager = SessionManager(
+            storage=storage,
+            provider="deepseek",
+            model="astron-code-latest",
+            workspace_root=bad_root,
+        )
+        manager.start_session()
+        manager.add_message("user", "test")
+        # _auto_export_log 内部写入失败应被捕获，不抛异常
+        manager.save()
+
+    def test_session_export_markdown_thinking(self) -> None:
+        """导出 Markdown 时 assistant 消息的 thinking 字段用 <details> 折叠块显示。"""
+        record = _make_record(
+            messages=[
+                {"role": "assistant", "content": "回答", "thinking": "思考过程"},
+            ],
+        )
+        exporter = SessionExporter()
+        md = exporter.to_markdown(record)
+        assert "<details>" in md
+        assert "<summary>🤔 Thinking</summary>" in md
+        assert "思考过程" in md
+        assert "</details>" in md
+
+    def test_session_export_markdown_tool_args_result(self) -> None:
+        """导出 Markdown 时工具调用汇总包含参数摘要和结果摘要。"""
+        record = _make_record(
+            tool_calls=[
+                {
+                    "tool_name": "read_file",
+                    "arguments": {"path": "main.py", "offset": 10},
+                    "result": "file content here",
+                    "duration_ms": 20,
+                    "timestamp": "2026-01-01T00:00:01",
+                }
+            ],
+        )
+        exporter = SessionExporter()
+        md = exporter.to_markdown(record)
+        assert "参数摘要" in md
+        assert "结果摘要" in md
+        assert "main.py" in md
+        assert "file content here" in md
+
     def test_session_save_fails_silently(self, tmp_path: Path) -> None:
         """storage 写入失败时 save 不抛异常只 log warning。
 

@@ -131,6 +131,33 @@ class SessionManager:
             }
         )
 
+    def add_thinking(self, content: str) -> None:
+        """记录思考过程内容。
+
+        将 thinking 内容追加到当前最后一条 assistant 消息的 thinking 字段。
+        如果没有 assistant 消息，创建一条。
+
+        Args:
+            content: 思考过程文本片段。
+        """
+        if self._record is None:
+            logger.warning("未开始会话，add_thinking 被忽略")
+            return
+        # 找到最后一条 assistant 消息，追加 thinking
+        for msg in reversed(self._record["messages"]):
+            if msg.get("role") == "assistant":
+                msg.setdefault("thinking", "")
+                msg["thinking"] += content
+                return
+        # 没有 assistant 消息，创建一条
+        self._record["messages"].append(
+            {
+                "role": "assistant",
+                "content": "",
+                "thinking": content,
+            }
+        )
+
     def save(self) -> None:
         """调用 storage.save()，静默失败（写入失败不影响主流程，log warning）。"""
         if self._record is None:
@@ -145,6 +172,24 @@ class SessionManager:
                 session_id=self._record["session_id"],
                 error=str(e),
             )
+        # 自动导出对话日志到工作目录
+        self._auto_export_log()
+
+    def _auto_export_log(self) -> None:
+        """自动导出 Markdown 格式对话日志到工作目录。"""
+        if self._record is None:
+            return
+        try:
+            from codepilot.session.export import SessionExporter
+
+            exporter = SessionExporter()
+            md_content = exporter.to_markdown(self._record)
+            log_path = (
+                self.workspace_root / f"codepilot-log-{self._record['session_id']}.md"
+            )
+            log_path.write_text(md_content, encoding="utf-8")
+        except Exception as e:
+            logger.warning("自动导出对话日志失败", error=str(e))
 
     def get_record(self) -> SessionRecord:
         """返回当前会话记录。

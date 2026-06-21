@@ -61,13 +61,24 @@ class SessionExporter:
         if tool_calls:
             lines.append("## 工具调用汇总")
             lines.append("")
-            lines.append("| # | 工具 | 耗时(ms) | 时间戳 |")
-            lines.append("| --- | --- | --- | --- |")
+            lines.append("| # | 工具 | 参数摘要 | 结果摘要 | 耗时(ms) | 时间戳 |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
             for i, tc in enumerate(tool_calls, 1):
                 name = tc.get("tool_name", "")
                 duration = tc.get("duration_ms", 0)
                 ts = tc.get("timestamp", "")
-                lines.append(f"| {i} | {name} | {duration} | {ts} |")
+                # 参数摘要：截断到 60 字符
+                args = tc.get("arguments", {})
+                args_str = json.dumps(args, ensure_ascii=False) if args else ""
+                if len(args_str) > 60:
+                    args_str = args_str[:57] + "..."
+                # 结果摘要：截断到 60 字符
+                result_str = tc.get("result", "")
+                if len(result_str) > 60:
+                    result_str = result_str[:57] + "..."
+                lines.append(
+                    f"| {i} | {name} | {args_str} | {result_str} | {duration} | {ts} |"
+                )
             lines.append("")
 
         # 对话历史
@@ -84,6 +95,14 @@ class SessionExporter:
             }.get(role, role)
             lines.append(f"### {role_label}")
             lines.append("")
+            # assistant 消息的 thinking 折叠块
+            if role == "assistant" and msg.get("thinking"):
+                lines.append("<details><summary>🤔 Thinking</summary>")
+                lines.append("")
+                lines.append(msg["thinking"])
+                lines.append("")
+                lines.append("</details>")
+                lines.append("")
             lines.append(str(content))
             lines.append("")
 

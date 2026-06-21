@@ -304,6 +304,7 @@ class AgentLoop:
 
             # b. 调用 provider.chat，c. 流式处理 AgentEvent
             accumulated_text = ""
+            accumulated_thinking = ""
             tool_calls: list[ToolCall] = []
             stop_reason = ""
 
@@ -322,6 +323,7 @@ class AgentLoop:
                         accumulated_text += event.text
                         await self._emit_text_delta(event.text)
                     elif isinstance(event, ThinkingDelta):
+                        accumulated_thinking += event.text
                         await self._emit_thinking_delta(event.text)
                     elif isinstance(event, ToolCall):
                         tool_calls.append(event)
@@ -357,6 +359,13 @@ class AgentLoop:
             )
             await self.context_manager.add_message("assistant", assistant_msg)
             self._record_session_message("assistant", accumulated_text)
+
+            # 记录 thinking 内容到 session
+            if accumulated_thinking and self.session_manager is not None:
+                try:
+                    self.session_manager.add_thinking(accumulated_thinking)
+                except Exception as e:
+                    logger.warning("session 记录 thinking 失败", error=str(e))
 
             # 保存当前文本作为可能的最终回复
             if accumulated_text:

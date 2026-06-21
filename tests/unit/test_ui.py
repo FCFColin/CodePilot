@@ -100,19 +100,59 @@ class TestDisplayManager:
         await display.on_turn_end()
 
     async def test_on_thinking_delta(self) -> None:
-        """on_thinking_delta 输出思考面板。"""
-        display, output = _make_display(show_thinking=True)
+        """on_thinking_delta 累积思考内容到 _current_thinking。"""
+        display, _ = _make_display(show_thinking=True)
         await display.on_thinking_delta("思考中...")
-        result = output.getvalue()
-        assert "思考中..." in result
-        assert "Thinking" in result
+        assert display._current_thinking == "思考中..."
+        await display.on_thinking_delta("继续思考")
+        assert display._current_thinking == "思考中...继续思考"
+        # Live 应已启动
+        assert display._live is not None
+        await display.on_turn_end()
 
     async def test_on_thinking_delta_disabled(self) -> None:
-        """show_thinking=False 时不输出思考面板。"""
-        display, output = _make_display(show_thinking=False)
+        """show_thinking=False 时不累积思考内容。"""
+        display, _ = _make_display(show_thinking=False)
         await display.on_thinking_delta("思考中...")
-        result = output.getvalue()
-        assert "思考中..." not in result
+        assert display._current_thinking == ""
+        # Live 不应启动
+        assert display._live is None
+
+    async def test_on_thinking_delta_accumulates(self) -> None:
+        """连续调用 on_thinking_delta 两次，_current_thinking 累积两段文本。"""
+        display, _ = _make_display(show_thinking=True)
+        await display.on_thinking_delta("第一段")
+        await display.on_thinking_delta("第二段")
+        assert display._current_thinking == "第一段第二段"
+        await display.on_turn_end()
+
+    async def test_on_thinking_delta_to_text_transition(self) -> None:
+        """先 on_thinking_delta 再 on_text_delta，thinking 被固化且文本正确显示。"""
+        display, _ = _make_display(show_thinking=True)
+        await display.on_thinking_delta("我在思考")
+        assert display._thinking_finalized is False
+        await display.on_text_delta("正式回答")
+        assert display._thinking_finalized is True
+        assert display._current_text == "正式回答"
+        assert display._current_thinking == "我在思考"
+        await display.on_turn_end()
+
+    async def test_on_thinking_delta_show_in_panel(self) -> None:
+        """_build_assistant_panel 在有 _current_thinking 时包含 thinking 内容。"""
+        display, _ = _make_display(show_thinking=True)
+        await display.on_thinking_delta("深度思考内容")
+        panel = display._build_assistant_panel()
+        # Panel 的 renderable 是 Text 对象，转为字符串检查
+        panel_str = panel.renderable.plain if hasattr(panel.renderable, "plain") else str(panel.renderable)
+        assert "深度思考内容" in panel_str
+        await display.on_turn_end()
+
+    async def test_on_thinking_delta_disabled_no_live(self) -> None:
+        """show_thinking=False 时 on_thinking_delta 不启动 Live。"""
+        display, _ = _make_display(show_thinking=False)
+        await display.on_thinking_delta("思考中")
+        assert display._live is None
+        assert display._current_thinking == ""
 
     async def test_on_tool_call(self) -> None:
         """on_tool_call 输出工具调用面板。"""

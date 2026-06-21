@@ -41,5 +41,7 @@ temp.md
 .codepilot.yml
 .codepilot/
 .codepilot_cache/
+codepilot-log-*.md
+test_website/
 pytest_out.txt
 pytest_cov.txt

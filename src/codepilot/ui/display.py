@@ -122,6 +122,8 @@ class DisplayManager:
         # 流式文本累积状态
         self._live: Live | None = None
         self._current_text: str = ""
+        self._current_thinking: str = ""
+        self._thinking_finalized: bool = False
 
         # 累计 input/output token 用量（来自 on_usage 事件）
         self._cumulative_input: int = 0
@@ -136,6 +138,8 @@ class DisplayManager:
         if self._live is not None:
             return
         self._current_text = ""
+        self._current_thinking = ""
+        self._thinking_finalized = False
         self._live = Live(
             self._build_assistant_panel(),
             console=self.console,
@@ -155,15 +159,29 @@ class DisplayManager:
                 with contextlib.suppress(Exception):
                     self._live.stop()
             self._live = None
-            self._current_text = ""
+        self._current_text = ""
+        self._current_thinking = ""
+        self._thinking_finalized = False
 
     def _build_assistant_panel(self) -> Panel:
         """构建 assistant 回复面板。"""
-        content = (
-            Text(self._current_text)
-            if self._current_text
-            else Text("...", style="dim italic")
-        )
+        parts: list[Text | str] = []
+
+        # Thinking 区域（正在累积或已固化）
+        if self._current_thinking and self.config.show_thinking:
+            thinking_text = Text(self._current_thinking, style="dim italic")
+            parts.append(thinking_text)
+            if self._current_text:
+                parts.append(Text("\n─" * 40 + "\n", style="dim"))
+
+        # 文本区域
+        if self._current_text:
+            parts.append(Text(self._current_text))
+
+        if not parts:
+            parts.append(Text("...", style="dim italic"))
+
+        content = Text.assemble(*parts)
         return Panel(
             content,
             title="Assistant",
@@ -179,25 +197,27 @@ class DisplayManager:
         """流式输出文本。用 rich.live.Live 实时更新 assistant 面板。"""
         if self._live is None:
             self._start_live()
+        # 收到第一个 text delta 时固化 thinking
+        if not self._thinking_finalized and self._current_thinking:
+            self._thinking_finalized = True
         self._current_text += text
         if self._live is not None:
             with contextlib.suppress(Exception):
                 self._live.update(self._build_assistant_panel())
 
     async def on_thinking_delta(self, text: str) -> None:
-        """显示思考过程（灰色/暗色，斜体）。"""
-        # 思考过程不进入 Live，直接打印
-        self._stop_live()
+        """显示思考过程（灰色/暗色，斜体），累积到 Live 面板中。"""
         if not self.config.show_thinking:
             return
-        content = Text(text, style="dim italic")
-        panel = Panel(
-            content,
-            title="Thinking",
-            border_style="dim",
-            padding=(0, 1),
-        )
-        self.console.print(panel)
+        # 如果 Live 没运行，先启动 Live 面板（_start_live 会重置状态，所以先启动再累积）
+        if self._live is None:
+            self._start_live()
+        # 累积 thinking 内容
+        self._current_thinking += text
+        # 更新 Live 面板
+        if self._live is not None:
+            with contextlib.suppress(Exception):
+                self._live.update(self._build_assistant_panel())
 
     async def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
         """显示工具调用面板（标题"工具调用"，显示工具名和参数）。"""
