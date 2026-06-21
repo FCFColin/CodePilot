@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="个人作品集 - 全栈开发者，热爱构建优雅的数字体验">
+  <title>Alex Chen | 全栈开发者</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ========== 导航栏 ========== -->
+  <nav class="navbar" role="navigation" aria-label="主导航">
+    <div class="navbar-inner">
+      <a href="index.html" class="navbar-logo">Alex.dev</a>
+      <button class="navbar-toggle" aria-label="切换菜单" onclick="toggleMenu()">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <ul class="navbar-links" id="navLinks">
+        <li><a href="index.html" class="active">首页</a></li>
+        <li><a href="projects.html">作品</a></li>
+        <li><a href="about.html">关于</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ========== 主内容 ========== -->
+  <main>
+    <!-- Hero 区域 -->
+    <section class="hero">
+      <div class="hero-content">
+        <div class="hero-badge animate-fade-in-up">🚀 欢迎来到我的数字空间</div>
+        <h1 class="hero-title animate-fade-in-up delay-1">
+          你好，我是<br>
+          <span class="gradient-text">Alex Chen</span>
+        </h1>
+        <p class="hero-subtitle animate-fade-in-up delay-2">
+          全栈开发者 · 专注于构建优雅、高性能的 Web 应用与数字体验。将创意转化为代码，让技术服务于设计。
+        </p>
+        <div class="hero-actions animate-fade-in-up delay-3">
+          <a href="projects.html" class="btn btn-primary">
+            查看作品 →
+          </a>
+          <a href="about.html" class="btn btn-secondary">
+            了解更多
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- 精选项目 -->
+    <section class="section">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-label">精选作品</span>
+          <h2 class="section-title">近期项目</h2>
+          <p class="section-desc">每一个项目都是一次探索，融合了技术深度与设计美学</p>
+        </div>
+
+        <div class="projects-grid">
+          <!-- 项目卡片 1 -->
+          <article class="project-card animate-fade-in-up delay-1">
+            <div class="project-card-image">🎨</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">React</span>
+                <span class="tag">Three.js</span>
+                <span class="tag">WebGL</span>
+              </div>
+              <h3 class="project-card-title">3D 创意画板</h3>
+              <p class="project-card-desc">基于 WebGL 的在线 3D 建模工具，支持实时协作、材质编辑和多视角渲染。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2024</span>
+              <a href="projects.html" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目卡片 2 -->
+          <article class="project-card animate-fade-in-up delay-2">
+            <div class="project-card-image">📊</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Vue 3</span>
+                <span class="tag">D3.js</span>
+                <span class="tag">Python</span>
+              </div>
+              <h3 class="project-card-title">智能数据仪表盘</h3>
+              <p class="project-card-desc">实时数据可视化平台，集成机器学习预测模型，支持自定义图表和报告导出。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2024</span>
+              <a href="projects.html" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目卡片 3 -->
+          <article class="project-card animate-fade-in-up delay-3">
+            <div class="project-card-image">⚡</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Node.js</span>
+                <span class="tag">GraphQL</span>
+                <span class="tag">Redis</span>
+              </div>
+              <h3 class="project-card-title">高并发 API 网关</h3>
+              <p class="project-card-desc">企业级 API 网关服务，支持限流、熔断、负载均衡，单节点 QPS 达 50k+。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2023</span>
+              <a href="projects.html" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+        </div>
+
+        <div style="text-align: center; margin-top: 3rem;">
+          <a href="projects.html" class="btn btn-secondary">查看全部作品 →</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- 统计数字 -->
+    <section class="section" style="padding-top: 0;">
+      <div class="container">
+        <div class="stats-grid">
+          <div class="stat-card animate-fade-in-up delay-1">
+            <div class="stat-number">5+</div>
+            <div class="stat-label">年开发经验</div>
+          </div>
+          <div class="stat-card animate-fade-in-up delay-2">
+            <div class="stat-number">30+</div>
+            <div class="stat-label">完成项目</div>
+          </div>
+          <div class="stat-card animate-fade-in-up delay-3">
+            <div class="stat-number">15+</div>
+            <div class="stat-label">技术栈</div>
+          </div>
+          <div class="stat-card animate-fade-in-up delay-4">
+            <div class="stat-number">99%</div>
+            <div class="stat-label">客户满意度</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ========== 页脚 ========== -->
+  <footer class="footer" role="contentinfo">
+    <div class="footer-inner">
+      <ul class="footer-links">
+        <li><a href="index.html">首页</a></li>
+        <li><a href="projects.html">作品</a></li>
+        <li><a href="about.html">关于</a></li>
+      </ul>
+      <div class="footer-social">
+        <a href="#" aria-label="GitHub">💻</a>
+        <a href="#" aria-label="Twitter">🐦</a>
+        <a href="#" aria-label="Email">📧</a>
+        <a href="#" aria-label="LinkedIn">🔗</a>
+      </div>
+      <p class="footer-copy">© 2024 Alex Chen. 用 ❤️ 和代码构建</p>
+    </div>
+  </footer>
+
+  <!-- ========== 脚本 ========== -->
+  <script>
+    // 移动端导航菜单切换
+    function toggleMenu() {
+      const navLinks = document.getElementById('navLinks');
+      navLinks.classList.toggle('open');
+    }
+
+    // 点击导航链接后关闭菜单
+    document.querySelectorAll('.navbar-links a').forEach(link => {
+      link.addEventListener('click', () => {
+        document.getElementById('navLinks').classList.remove('open');
+      });
+    });
+
+    // 滚动时导航栏背景加深
+    window.addEventListener('scroll', () => {
+      const navbar = document.querySelector('.navbar');
+      if (window.scrollY > 50) {
+        navbar.style.background = 'rgba(10, 10, 15, 0.95)';
+      } else {
+        navbar.style.background = 'rgba(10, 10, 15, 0.85)';
+      }
+    });
+
+    // Intersection Observer 滚动动画
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.animationPlayState = 'running';
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.animate-fade-in-up').forEach(el => {
+      el.style.animationPlayState = 'paused';
+      observer.observe(el);
+    });
+  </script>
+
+</body>
+</html>
