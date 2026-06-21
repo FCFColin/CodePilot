@@ -43,5 +43,6 @@ temp.md
 .codepilot_cache/
 codepilot-log-*.md
 test_website/
+flask_demo/
 pytest_out.txt
 pytest_cov.txt

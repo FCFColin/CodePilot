@@ -7,9 +7,9 @@ UndoTracker 撤销逻辑、TrackedToolWrapper 工具包装器。
 
 from __future__ import annotations
 
+import builtins
 import os
 import subprocess
-import builtins
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -22,11 +22,12 @@ from codepilot.config import (
     AnthropicConfig,
     Config,
     DeepSeekConfig,
+    ProviderConfig,
     SecurityConfig,
 )
 from codepilot.exceptions import CodePilotError
 from codepilot.providers.anthropic import AnthropicProvider
-from codepilot.providers.deepseek import DeepSeekProvider
+from codepilot.providers.openai_compat import OpenAICompatProvider
 from codepilot.tools.registry import BaseTool
 
 # ============================================================================
@@ -91,10 +92,10 @@ class TestApp:
     """App 组件组装与 slash 命令测试。"""
 
     def test_app_creates_deepseek_provider(self, tmp_path: Path) -> None:
-        """App 使用 deepseek provider 时创建 DeepSeekProvider。"""
+        """App 使用 deepseek provider 时创建 OpenAICompatProvider。"""
         config = _make_config(tmp_path, provider="deepseek")
         app = App(config)
-        assert isinstance(app.provider, DeepSeekProvider)
+        assert isinstance(app.provider, OpenAICompatProvider)
 
     def test_app_creates_anthropic_provider(self, tmp_path: Path) -> None:
         """App 使用 anthropic provider 时创建 AnthropicProvider。"""
@@ -953,3 +954,229 @@ class TestSessionManagerCreation:
         config = _make_config(tmp_path, provider="anthropic")
         app = App(config)
         assert app.session_manager.model == config.anthropic.model
+
+
+# ============================================================================
+# TestMultiProviderAppCreation
+# ============================================================================
+
+
+class TestMultiProviderAppCreation:
+    """多 Provider 配置下 App 创建测试。"""
+
+    def _make_multi_provider_config(
+        self,
+        tmp_path: Path,
+        active_provider: str = "provider_a",
+    ) -> Config:
+        """构造带 providers 字典的测试用 Config。"""
+        _clear_codepilot_env(pytest.MonkeyPatch())
+        return Config(
+            provider=active_provider,
+            providers={
+                "provider_a": ProviderConfig(
+                    type="openai",
+                    api_key=SecretStr("sk-test-a"),
+                    base_url="https://a.example.com/v1",
+                    model="model-a",
+                ),
+                "provider_b": ProviderConfig(
+                    type="anthropic",
+                    api_key=SecretStr("sk-test-b"),
+                    base_url="https://b.example.com",
+                    model="model-b",
+                ),
+            },
+            security=SecurityConfig(
+                workspace_root=str(tmp_path),
+                blocked_paths=[],
+            ),
+        )
+
+    def test_app_creates_openai_compat_from_provider_config(
+        self, tmp_path: Path
+    ) -> None:
+        """providers 中 type=openai 时创建 OpenAICompatProvider。"""
+        config = self._make_multi_provider_config(tmp_path, "provider_a")
+        app = App(config)
+        assert isinstance(app.provider, OpenAICompatProvider)
+
+    def test_app_creates_anthropic_from_provider_config(
+        self, tmp_path: Path
+    ) -> None:
+        """providers 中 type=anthropic 时创建 AnthropicProvider。"""
+        config = self._make_multi_provider_config(tmp_path, "provider_b")
+        app = App(config)
+        assert isinstance(app.provider, AnthropicProvider)
+
+    def test_session_manager_model_from_providers(
+        self, tmp_path: Path
+    ) -> None:
+        """providers 格式时 session_manager 使用正确的模型名。"""
+        config = self._make_multi_provider_config(tmp_path, "provider_a")
+        app = App(config)
+        assert app.session_manager.model == "model-a"
+
+    async def test_slash_provider_shows_available_providers(
+        self, tmp_path: Path
+    ) -> None:
+        """/provider 无参数时显示可用 provider 列表。"""
+        config = self._make_multi_provider_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/provider")
+        assert result is False
+
+    async def test_slash_provider_switch_to_other_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """/provider 切换到 providers 中的其他 provider。"""
+        config = self._make_multi_provider_config(tmp_path, "provider_a")
+        app = App(config)
+        result = await app._handle_slash_command("/provider provider_b")
+        assert result is False
+        assert config.provider == "provider_b"
+
+    async def test_slash_model_updates_providers_dict(self, tmp_path: Path) -> None:
+        """/model 更新 providers 字典中的活跃 provider 模型。"""
+        config = self._make_multi_provider_config(tmp_path, "provider_a")
+        app = App(config)
+        result = await app._handle_slash_command("/model new-model-a")
+        assert result is False
+        assert config.providers["provider_a"].model == "new-model-a"
+
+
+# ============================================================================
+# TestRollbackPlanProviders
+# ============================================================================
+
+
+class TestRollbackPlanProviders:
+    """/rollback、/plan、/providers 命令测试。"""
+
+    async def test_slash_rollback_invalid_arg(self, tmp_path: Path) -> None:
+        """/rollback 无效参数时显示错误。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 非数字参数
+        result = await app._handle_slash_command("/rollback abc")
+        assert result is False
+        # 无参数
+        result = await app._handle_slash_command("/rollback")
+        assert result is False
+
+    async def test_slash_rollback_out_of_range(self, tmp_path: Path) -> None:
+        """/rollback 轮次号超出范围时显示错误。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 添加 2 轮对话
+        await app.context_manager.add_message("user", "问题1")
+        await app.context_manager.add_message("assistant", "回答1")
+        await app.context_manager.add_message("user", "问题2")
+        await app.context_manager.add_message("assistant", "回答2")
+        # 轮次号 0（太小）
+        result = await app._handle_slash_command("/rollback 0")
+        assert result is False
+        # 轮次号 5（超出范围）
+        result = await app._handle_slash_command("/rollback 5")
+        assert result is False
+        # 轮次号 -1（负数）
+        result = await app._handle_slash_command("/rollback -1")
+        assert result is False
+
+    async def test_slash_rollback_valid(self, tmp_path: Path) -> None:
+        """/rollback 有效轮次号时删除后续消息。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 添加 3 轮对话
+        await app.context_manager.add_message("user", "问题1")
+        await app.context_manager.add_message("assistant", "回答1")
+        await app.context_manager.add_message("user", "问题2")
+        await app.context_manager.add_message("assistant", "回答2")
+        await app.context_manager.add_message("user", "问题3")
+        await app.context_manager.add_message("assistant", "回答3")
+        assert len(app.context_manager.messages) == 6
+        # 回退到第 1 轮
+        result = await app._handle_slash_command("/rollback 1")
+        assert result is False
+        assert len(app.context_manager.messages) == 2
+
+    async def test_slash_rollback_no_need(self, tmp_path: Path) -> None:
+        """/rollback 目标轮次等于当前轮次时无需回退。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 添加 2 轮对话
+        await app.context_manager.add_message("user", "问题1")
+        await app.context_manager.add_message("assistant", "回答1")
+        await app.context_manager.add_message("user", "问题2")
+        await app.context_manager.add_message("assistant", "回答2")
+        # 回退到第 2 轮（等于当前轮次）
+        result = await app._handle_slash_command("/rollback 2")
+        assert result is False
+        # 消息数不变
+        assert len(app.context_manager.messages) == 4
+
+    async def test_slash_plan_no_plan(self, tmp_path: Path) -> None:
+        """/plan 无活跃计划时显示提示。"""
+        from codepilot.tools.plan_tool import PlanTool
+
+        PlanTool.clear_plan()
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/plan")
+        assert result is False
+
+    async def test_slash_plan_with_plan(self, tmp_path: Path) -> None:
+        """/plan 有活跃计划时显示计划状态。"""
+        from codepilot.tools.plan_tool import PlanTool
+
+        PlanTool.clear_plan()
+        # 创建一个计划
+        tool = PlanTool()
+        tool._create_plan({
+            "title": "测试计划",
+            "steps": [
+                {"id": "s1", "description": "步骤1"},
+                {"id": "s2", "description": "步骤2"},
+            ],
+        })
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/plan")
+        assert result is False
+        # 清理
+        PlanTool.clear_plan()
+
+    async def test_slash_providers_legacy_format(self, tmp_path: Path) -> None:
+        """/providers 旧格式（无 providers 字典）时显示 deepseek 和 anthropic。"""
+        config = _make_config(tmp_path, provider="deepseek")
+        app = App(config)
+        result = await app._handle_slash_command("/providers")
+        assert result is False
+
+    async def test_slash_providers_new_format(self, tmp_path: Path) -> None:
+        """/providers 新格式（有 providers 字典）时显示所有 provider。"""
+        _clear_codepilot_env(pytest.MonkeyPatch())
+        config = Config(
+            provider="provider_a",
+            providers={
+                "provider_a": ProviderConfig(
+                    type="openai",
+                    api_key=SecretStr("sk-test-a"),
+                    base_url="https://a.example.com/v1",
+                    model="model-a",
+                ),
+                "provider_b": ProviderConfig(
+                    type="anthropic",
+                    api_key=SecretStr("sk-test-b"),
+                    base_url="https://b.example.com",
+                    model="model-b",
+                ),
+            },
+            security=SecurityConfig(
+                workspace_root=str(tmp_path),
+                blocked_paths=[],
+            ),
+        )
+        app = App(config)
+        result = await app._handle_slash_command("/providers")
+        assert result is False

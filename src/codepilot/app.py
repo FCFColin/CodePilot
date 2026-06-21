@@ -19,7 +19,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
 from codepilot.agent.loop import DEFAULT_SYSTEM_PROMPT, AgentLoop
-from codepilot.config import Config
+from codepilot.config import AnthropicConfig, Config, ProviderConfig
 from codepilot.context.compressor import CompressionStrategy, ContextCompressor
 from codepilot.context.manager import ContextManager
 from codepilot.context.token_counter import TokenCounter
@@ -28,7 +28,7 @@ from codepilot.git import CommitMessageGenerator, GitManager
 from codepilot.hooks import GitCommitHook, HookRegistry, LintHook
 from codepilot.providers.anthropic import AnthropicProvider
 from codepilot.providers.base import BaseProvider
-from codepilot.providers.deepseek import DeepSeekProvider
+from codepilot.providers.openai_compat import OpenAICompatProvider
 from codepilot.repomap import RepoMapper
 from codepilot.security.approval import ApprovalManager
 from codepilot.security.sandbox import Sandbox
@@ -284,14 +284,17 @@ class App:
 
         # 10. 创建 SessionManager（会话持久化）
         self.session_storage = SessionStorage()
+        # 获取当前模型名
+        if config.providers and config.provider in config.providers:
+            current_model = config.providers[config.provider].model
+        elif config.provider == "anthropic":
+            current_model = config.anthropic.model
+        else:
+            current_model = config.deepseek.model
         self.session_manager = SessionManager(
             storage=self.session_storage,
             provider=config.provider,
-            model=(
-                config.anthropic.model
-                if config.provider == "anthropic"
-                else config.deepseek.model
-            ),
+            model=current_model,
             workspace_root=Path(config.security.workspace_root),
         )
         self.session_exporter = SessionExporter()
@@ -321,10 +324,42 @@ class App:
 
     @staticmethod
     def _create_provider(config: Config) -> BaseProvider:
-        """根据 config.provider 创建对应的 provider 实例。"""
+        """根据 config.provider 创建对应的 provider 实例。
+
+        优先使用 providers 字典（新格式），回退到 deepseek/anthropic 字段（旧格式）。
+        """
+        # 新格式：providers 字典
+        if config.providers and config.provider in config.providers:
+            prov_config = config.providers[config.provider]
+            if prov_config.type == "anthropic":
+                # 从 ProviderConfig 转换为 AnthropicConfig
+                anthropic_config = AnthropicConfig(
+                    api_key=prov_config.api_key,
+                    base_url=prov_config.base_url,
+                    model=prov_config.model,
+                    max_tokens=prov_config.max_tokens,
+                    temperature=prov_config.temperature,
+                )
+                return AnthropicProvider(anthropic_config)
+            # 默认 type == "openai"
+            return OpenAICompatProvider(prov_config)
+
+        # 旧格式：deepseek/anthropic 字段
         if config.provider == "anthropic":
             return AnthropicProvider(config.anthropic)
-        return DeepSeekProvider(config.deepseek)
+        return OpenAICompatProvider(
+            ProviderConfig(
+                type="openai",
+                api_key=config.deepseek.api_key,
+                base_url=config.deepseek.base_url,
+                model=config.deepseek.model,
+                max_tokens=config.deepseek.max_tokens,
+                temperature=config.deepseek.temperature,
+                top_p=config.deepseek.top_p,
+                stream=config.deepseek.stream,
+                thinking=config.deepseek.thinking,
+            )
+        )
 
     def _create_tool_registry(self, config: Config) -> ToolRegistry:
         """创建工具注册表，对文件操作工具添加撤销追踪与 Git 自动提交。
@@ -586,6 +621,15 @@ class App:
         if cmd == "/approve":
             return self._handle_approve_command()
 
+        if cmd == "/rollback":
+            return self._handle_rollback_command(arg)
+
+        if cmd == "/plan":
+            return self._handle_plan_command()
+
+        if cmd == "/providers":
+            return self._handle_providers_command()
+
         if cmd == "/undo":
             # 优先尝试 Git 撤销最近一次 codepilot 提交
             if self.git_manager.is_git_repo():
@@ -621,7 +665,9 @@ class App:
         display = self.display
         if not arg:
             # 显示当前模型
-            if self.config.provider == "anthropic":
+            if self.config.providers and self.config.provider in self.config.providers:
+                current = self.config.providers[self.config.provider].model
+            elif self.config.provider == "anthropic":
                 current = self.config.anthropic.model
             else:
                 current = self.config.deepseek.model
@@ -629,7 +675,14 @@ class App:
             display.console.print("[dim]用法: /model <model_name>[/dim]")
             return False
         # 切换模型
-        if self.config.provider == "anthropic":
+        if self.config.providers and self.config.provider in self.config.providers:
+            new_prov = self.config.providers[self.config.provider].model_copy(
+                update={"model": arg}
+            )
+            new_providers = dict(self.config.providers)
+            new_providers[self.config.provider] = new_prov
+            self.config.providers = new_providers
+        elif self.config.provider == "anthropic":
             self.config.anthropic.model = arg
         else:
             self.config.deepseek.model = arg
@@ -643,14 +696,28 @@ class App:
         display = self.display
         if not arg:
             display.console.print(f"[cyan]当前 provider: {self.config.provider}[/cyan]")
-            display.console.print("[dim]用法: /provider <deepseek|anthropic>[/dim]")
+            if self.config.providers:
+                available = ", ".join(self.config.providers.keys())
+                display.console.print(f"[dim]可用: {available}[/dim]")
+            else:
+                display.console.print("[dim]用法: /provider <deepseek|anthropic>[/dim]")
             return False
-        if arg not in ("deepseek", "anthropic"):
-            display.console.print(
-                f"[bold red]不支持的 provider: {arg}"
-                f"（可选: deepseek / anthropic）[/bold red]"
-            )
-            return False
+        # 验证 provider 名称
+        if self.config.providers:
+            if arg not in self.config.providers:
+                available = ", ".join(self.config.providers.keys())
+                display.console.print(
+                    f"[bold red]不支持的 provider: {arg}"
+                    f"（可用: {available}）[/bold red]"
+                )
+                return False
+        else:
+            if arg not in ("deepseek", "anthropic"):
+                display.console.print(
+                    f"[bold red]不支持的 provider: {arg}"
+                    f"（可选: deepseek / anthropic）[/bold red]"
+                )
+                return False
         self.config.provider = arg
         self._recreate_provider_and_loop()
         # 更新 DisplayManager 的 provider_name
@@ -674,6 +741,120 @@ class App:
             display.console.print(
                 "[bold red]YOLO 模式已开启，所有操作自动批准[/bold red]"
             )
+        return False
+
+    def _handle_rollback_command(self, arg: str) -> bool:
+        """处理 /rollback 命令，回退到指定轮次。
+
+        删除目标轮次之后的所有对话消息，不撤销文件变更。
+
+        Args:
+            arg: 目标轮次号。
+
+        Returns:
+            False 表示继续 REPL。
+        """
+        display = self.display
+        if not arg:
+            display.console.print("[yellow]用法: /rollback <轮次号>[/yellow]")
+            display.console.print(
+                "回退到指定轮次，删除该轮次之后的所有对话和文件变更"
+            )
+            return False
+
+        try:
+            target_turn = int(arg)
+        except ValueError:
+            display.console.print(f"[red]无效轮次号: {arg}[/red]")
+            return False
+
+        # 获取对话历史
+        messages = self.context_manager.messages
+        total_turns = len([m for m in messages if m.role == "user"])
+
+        if target_turn < 1 or target_turn > total_turns:
+            display.console.print(
+                f"[red]轮次号超出范围 (1-{total_turns})[/red]"
+            )
+            return False
+
+        # 保留前 target_turn*2 条消息（user+assistant 对）
+        keep_count = target_turn * 2
+        if len(messages) > keep_count:
+            removed = messages[keep_count:]
+            self.context_manager.messages = messages[:keep_count]
+            display.console.print(
+                f"[green]已回退到第 {target_turn} 轮，"
+                f"删除了 {len(removed)} 条消息[/green]"
+            )
+        else:
+            display.console.print(
+                f"[yellow]当前只有 {total_turns} 轮对话，无需回退[/yellow]"
+            )
+        return False
+
+    def _handle_plan_command(self) -> bool:
+        """处理 /plan 命令，显示当前执行计划。
+
+        Returns:
+            False 表示继续 REPL。
+        """
+        from codepilot.tools.plan_tool import PlanTool
+
+        plan = PlanTool.get_current_plan()
+        if plan is None:
+            self.display.console.print("[yellow]当前没有活跃的执行计划[/yellow]")
+        else:
+            tool = PlanTool()
+            status = tool._get_status()
+            self.display.console.print(status)
+        return False
+
+    def _handle_providers_command(self) -> bool:
+        """处理 /providers 命令，显示所有已配置的 provider。
+
+        Returns:
+            False 表示继续 REPL。
+        """
+        from rich.table import Table
+
+        table = Table(title="已配置的 Providers")
+        table.add_column("名称", style="cyan")
+        table.add_column("类型", style="green")
+        table.add_column("Base URL", style="blue")
+        table.add_column("模型", style="magenta")
+        table.add_column("状态", style="yellow")
+
+        current_provider = self.config.provider
+
+        if self.config.providers:
+            for name, pcfg in self.config.providers.items():
+                is_active = "→ 当前" if name == current_provider else ""
+                table.add_row(
+                    name,
+                    pcfg.type,
+                    pcfg.base_url or "(默认)",
+                    pcfg.model or "(默认)",
+                    is_active,
+                )
+        else:
+            # 旧格式
+            table.add_row(
+                "deepseek",
+                "openai",
+                self.config.deepseek.base_url,
+                self.config.deepseek.model,
+                "→ 当前" if current_provider == "deepseek" else "",
+            )
+            table.add_row(
+                "anthropic",
+                "anthropic",
+                self.config.anthropic.base_url,
+                self.config.anthropic.model,
+                "→ 当前" if current_provider == "anthropic" else "",
+            )
+
+        self.display.console.print(table)
         return False
 
     def _handle_export_command(self, arg: str) -> bool:

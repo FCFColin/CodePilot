@@ -18,7 +18,9 @@ from codepilot.config import (
     Config,
     ContextConfig,
     DeepSeekConfig,
+    ProviderConfig,
     _load_yaml_config,
+    _migrate_legacy_config,
     _substitute_env_vars,
     load_config,
     validate_config,
@@ -388,10 +390,20 @@ class TestFailFast:
 class TestInvalidConfig:
     """无效配置测试。"""
 
-    def test_invalid_provider_raises(self) -> None:
-        """无效 provider 值触发 ValidationError。"""
-        with pytest.raises(ValidationError):
-            Config(provider="invalid")
+    def test_invalid_provider_in_providers_dict(self) -> None:
+        """providers 非空时 provider 必须是 providers 中的键。"""
+        config = Config(
+            provider="nonexistent",
+            providers={
+                "myprovider": ProviderConfig(
+                    api_key=SecretStr("sk-test"),
+                    base_url="https://example.com/v1",
+                    model="test-model",
+                )
+            },
+        )
+        with pytest.raises(ConfigError):
+            validate_config(config)
 
     def test_invalid_temperature_type_raises(self) -> None:
         """无效 temperature 类型触发 ValidationError。"""
@@ -402,3 +414,245 @@ class TestInvalidConfig:
         """无效 max_tokens 类型触发 ValidationError。"""
         with pytest.raises(ValidationError):
             ContextConfig(max_tokens="not-an-int")  # type: ignore[arg-type]
+
+
+class TestProviderConfig:
+    """ProviderConfig 模型测试。"""
+
+    def test_provider_config_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ProviderConfig 默认值正确。"""
+        _clear_codepilot_env(monkeypatch)
+        config = ProviderConfig()
+        assert config.type == "openai"
+        assert config.base_url == ""
+        assert config.model == ""
+        assert config.max_tokens == 8192
+        assert config.temperature == 0.7
+        assert config.top_p == 1.0
+        assert config.stream is True
+
+    def test_provider_config_anthropic_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ProviderConfig type=anthropic 可正常创建。"""
+        _clear_codepilot_env(monkeypatch)
+        config = ProviderConfig(
+            type="anthropic",
+            api_key=SecretStr("sk-test"),
+            base_url="https://api.anthropic.com",
+            model="claude-3-opus",
+        )
+        assert config.type == "anthropic"
+        assert config.model == "claude-3-opus"
+
+    def test_config_providers_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Config.providers 字典可正常使用。"""
+        _clear_codepilot_env(monkeypatch)
+        config = Config(
+            provider="myprovider",
+            providers={
+                "myprovider": ProviderConfig(
+                    api_key=SecretStr("sk-test"),
+                    base_url="https://example.com/v1",
+                    model="test-model",
+                )
+            },
+        )
+        assert "myprovider" in config.providers
+        assert config.providers["myprovider"].model == "test-model"
+
+
+class TestMigrateLegacyConfig:
+    """旧格式迁移测试。"""
+
+    def test_migrate_deepseek_to_providers(self) -> None:
+        """deepseek: 段自动迁移为 providers.deepseek。"""
+        yaml_data: dict[str, Any] = {
+            "deepseek": {
+                "api_key": "sk-test",
+                "base_url": "https://example.com/v1",
+                "model": "test-model",
+            }
+        }
+        result = _migrate_legacy_config(yaml_data)
+        assert "providers" in result
+        assert "deepseek" in result["providers"]
+        assert result["providers"]["deepseek"]["type"] == "openai"
+        assert result["providers"]["deepseek"]["model"] == "test-model"
+
+    def test_migrate_anthropic_to_providers(self) -> None:
+        """anthropic: 段自动迁移为 providers.anthropic。"""
+        yaml_data: dict[str, Any] = {
+            "anthropic": {
+                "api_key": "sk-ant-test",
+                "base_url": "https://api.anthropic.com",
+                "model": "claude-3",
+            }
+        }
+        result = _migrate_legacy_config(yaml_data)
+        assert "providers" in result
+        assert "anthropic" in result["providers"]
+        assert result["providers"]["anthropic"]["type"] == "anthropic"
+
+    def test_migrate_both_to_providers(self) -> None:
+        """deepseek: 和 anthropic: 同时迁移。"""
+        yaml_data: dict[str, Any] = {
+            "deepseek": {"api_key": "sk-ds", "model": "ds-model"},
+            "anthropic": {"api_key": "sk-ant", "model": "ant-model"},
+        }
+        result = _migrate_legacy_config(yaml_data)
+        assert "deepseek" in result["providers"]
+        assert "anthropic" in result["providers"]
+
+    def test_no_migrate_when_providers_exists(self) -> None:
+        """已有 providers: 段时不迁移。"""
+        yaml_data: dict[str, Any] = {
+            "providers": {"custom": {"type": "openai"}},
+            "deepseek": {"api_key": "sk-ds"},
+        }
+        result = _migrate_legacy_config(yaml_data)
+        # providers 不变，deepseek 不被迁移
+        assert "custom" in result["providers"]
+        assert "deepseek" not in result["providers"]
+
+    def test_no_migrate_when_no_legacy(self) -> None:
+        """无旧格式时不添加 providers。"""
+        yaml_data: dict[str, Any] = {"security": {"workspace_root": "."}}
+        result = _migrate_legacy_config(yaml_data)
+        assert "providers" not in result
+
+    def test_migrate_deepseek_preserves_temperature(self) -> None:
+        """迁移 deepseek 时保留默认 temperature=1.0。"""
+        yaml_data: dict[str, Any] = {
+            "deepseek": {"api_key": "sk-test"},
+        }
+        result = _migrate_legacy_config(yaml_data)
+        assert result["providers"]["deepseek"]["temperature"] == 1.0
+
+
+class TestMultiProviderConfig:
+    """多 Provider 配置加载测试。"""
+
+    def test_load_providers_from_yaml(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """从 YAML 加载 providers 段。"""
+        _clear_codepilot_env(monkeypatch)
+        yaml_file = tmp_path / ".codepilot.yml"
+        yaml_file.write_text(
+            "provider: myprovider\n"
+            "providers:\n"
+            "  myprovider:\n"
+            "    type: openai\n"
+            "    api_key: sk-test\n"
+            "    base_url: https://example.com/v1\n"
+            "    model: test-model\n",
+            encoding="utf-8",
+        )
+        config = load_config(config_path=str(yaml_file))
+        assert config.provider == "myprovider"
+        assert "myprovider" in config.providers
+        assert config.providers["myprovider"].type == "openai"
+        assert config.providers["myprovider"].model == "test-model"
+
+    def test_load_multiple_providers(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """加载多个 provider 配置。"""
+        _clear_codepilot_env(monkeypatch)
+        yaml_file = tmp_path / ".codepilot.yml"
+        yaml_file.write_text(
+            "provider: openai_provider\n"
+            "providers:\n"
+            "  openai_provider:\n"
+            "    type: openai\n"
+            "    api_key: sk-openai\n"
+            "    base_url: https://api.openai.com/v1\n"
+            "    model: gpt-4\n"
+            "  anthropic_provider:\n"
+            "    type: anthropic\n"
+            "    api_key: sk-anthropic\n"
+            "    base_url: https://api.anthropic.com\n"
+            "    model: claude-3\n",
+            encoding="utf-8",
+        )
+        config = load_config(config_path=str(yaml_file))
+        assert len(config.providers) == 2
+        assert config.providers["openai_provider"].type == "openai"
+        assert config.providers["anthropic_provider"].type == "anthropic"
+
+    def test_backward_compat_legacy_yaml(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """旧格式 YAML 自动迁移并正常加载。"""
+        _clear_codepilot_env(monkeypatch)
+        yaml_file = tmp_path / ".codepilot.yml"
+        yaml_file.write_text(
+            "provider: deepseek\n"
+            "deepseek:\n"
+            "  api_key: sk-legacy\n"
+            "  model: legacy-model\n",
+            encoding="utf-8",
+        )
+        config = load_config(config_path=str(yaml_file))
+        # 应迁移到 providers 格式
+        assert "deepseek" in config.providers
+        assert config.providers["deepseek"].type == "openai"
+        assert config.providers["deepseek"].model == "legacy-model"
+
+    def test_validate_provider_in_providers_dict(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """providers 非空时 provider 必须在字典中。"""
+        _clear_codepilot_env(monkeypatch)
+        _mock_no_yaml(monkeypatch)
+        # 直接构造 Config 并验证
+        config = Config(
+            provider="nonexistent",
+            providers={
+                "myprovider": ProviderConfig(
+                    api_key=SecretStr("sk-test"),
+                    base_url="https://example.com/v1",
+                    model="test-model",
+                )
+            },
+        )
+        with pytest.raises(ConfigError):
+            validate_config(config)
+
+    def test_codepilot_api_key_with_providers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CODEPILOT_API_KEY 覆盖 providers 中的 api_key。"""
+        _clear_codepilot_env(monkeypatch)
+        _mock_no_yaml(monkeypatch)
+        monkeypatch.setenv("CODEPILOT_API_KEY", "sk-convenience")
+        config = load_config()
+        # 默认 provider 为 deepseek，旧格式下应覆盖
+        assert config.deepseek.api_key.get_secret_value() == "sk-convenience"
+
+    def test_cli_provider_switch(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI --provider 切换到 providers 中的 provider。"""
+        _clear_codepilot_env(monkeypatch)
+        yaml_file = tmp_path / ".codepilot.yml"
+        yaml_file.write_text(
+            "provider: provider_a\n"
+            "providers:\n"
+            "  provider_a:\n"
+            "    type: openai\n"
+            "    api_key: sk-a\n"
+            "    base_url: https://a.example.com/v1\n"
+            "    model: model-a\n"
+            "  provider_b:\n"
+            "    type: anthropic\n"
+            "    api_key: sk-b\n"
+            "    base_url: https://b.example.com\n"
+            "    model: model-b\n",
+            encoding="utf-8",
+        )
+        args = _make_args(provider="provider_b")
+        config = load_config(args, config_path=str(yaml_file))
+        assert config.provider == "provider_b"
+        assert config.providers["provider_b"].model == "model-b"

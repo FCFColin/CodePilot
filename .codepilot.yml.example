@@ -1,24 +1,47 @@
 # ===== Provider 配置 =====
-provider: "deepseek"  # 可选: "deepseek" | "anthropic"
+provider: "deepseek"  # 当前活跃的 provider 名称
 
-deepseek:
-  api_key: "${CODEPILOT_API_KEY}"     # 支持环境变量引用
-  base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
-  model: "astron-code-latest"         # 讯飞星火 maas-coding-api 默认模型
-  max_tokens: 8192
-  temperature: 1.0                   # DeepSeek推荐 temperature=1.0, top_p=1.0
-  top_p: 1.0
-  stream: true
-  thinking:                          # 深度思考模式（可选）
-    enabled: false
-    reasoning_effort: "high"         # high | max
+# 新格式：providers 字典（推荐）
+# 每个键为 provider 名称，type 可选 "openai" 或 "anthropic"
+providers:
+  deepseek:
+    type: "openai"
+    api_key: "${CODEPILOT_API_KEY}"     # 支持环境变量引用
+    base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
+    model: "astron-code-latest"
+    max_tokens: 8192
+    temperature: 1.0
+    top_p: 1.0
+    stream: true
+    thinking:                          # 深度思考模式（可选）
+      enabled: false
+      reasoning_effort: "high"         # high | max
+  anthropic:
+    type: "anthropic"
+    api_key: "${CODEPILOT_API_KEY}"
+    base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
+    model: "astron-code-latest"
+    max_tokens: 8192
+    temperature: 0.7
 
-anthropic:
-  api_key: "${CODEPILOT_API_KEY}"
-  base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
-  model: "astron-code-latest"
-  max_tokens: 8192
-  temperature: 0.7
+# 旧格式（向后兼容，已弃用，建议迁移到 providers 格式）：
+# deepseek:
+#   api_key: "${CODEPILOT_API_KEY}"
+#   base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
+#   model: "astron-code-latest"
+#   max_tokens: 8192
+#   temperature: 1.0
+#   top_p: 1.0
+#   stream: true
+#   thinking:
+#     enabled: false
+#     reasoning_effort: "high"
+# anthropic:
+#   api_key: "${CODEPILOT_API_KEY}"
+#   base_url: "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
+#   model: "astron-code-latest"
+#   max_tokens: 8192
+#   temperature: 0.7
 
 # ===== 安全配置 =====
 security:

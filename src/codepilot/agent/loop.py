@@ -196,6 +196,8 @@ class AgentLoop:
         self.max_lint_retries = max_lint_retries
         self.repo_mapper = repo_mapper
         self._cancelled = False
+        self._recent_tool_calls: list[tuple[str, str]] = []
+        self._loop_detected: bool = False
         # 当前轮生效的系统提示（可能含 RepoMap 摘要）
         self._effective_system_prompt: str = self.system_prompt
         logger.debug(
@@ -298,6 +300,9 @@ class AgentLoop:
             if self._cancelled:
                 logger.info("Agent 循环被中断")
                 return final_text
+
+            # 重置循环检测标志
+            self._loop_detected = False
 
             # a. 获取当前上下文（内部触发 maybe_compress，实现每次工具调用后检查压缩）
             context = await self.context_manager.get_context()
@@ -404,6 +409,26 @@ class AgentLoop:
 
                     # 记录工具调用到 session
                     self._record_tool_call(tc.name, tc.arguments, result, duration_ms)
+
+                    # 循环检测：记录最近工具调用并检查重复模式
+                    tool_name = tc.name
+                    args_summary = str(tc.arguments)[:200]
+                    self._recent_tool_calls.append((tool_name, args_summary))
+                    if len(self._recent_tool_calls) > 5:
+                        self._recent_tool_calls = self._recent_tool_calls[-5:]
+
+                    if self._detect_loop():
+                        self._loop_detected = True
+                        loop_msg = (
+                            f"\n\n⚠️ 检测到重复调用模式："
+                            f"连续 3 次调用 {tool_name} 且参数相似。"
+                            f"请尝试不同的方法或策略。"
+                            f"如果当前方法不奏效，考虑：\n"
+                            f"1. 换一种实现方式\n"
+                            f"2. 先检查当前状态再决定下一步\n"
+                            f"3. 将问题分解为更小的步骤"
+                        )
+                        result += loop_msg
 
                     # iv. 触发 TOOL_CALL_AFTER Hook（如 LintHook）
                     # 若 Hook 返回 should_retry=True，将 retry_message 作为
@@ -518,6 +543,32 @@ class AgentLoop:
     # 内部辅助方法
     # ========================================================================
 
+    def _detect_loop(self) -> bool:
+        """检测是否出现重复工具调用模式。
+
+        当最近 3 次调用了相同工具且参数相似度 > 80% 时，判定为循环。
+
+        Returns:
+            True 表示检测到循环，False 表示未检测到。
+        """
+        if len(self._recent_tool_calls) < 3:
+            return False
+
+        import difflib
+
+        recent = self._recent_tool_calls[-3:]
+        # 检查最近 3 次是否调用了相同工具
+        tool_names = [call[0] for call in recent]
+        if len(set(tool_names)) != 1:
+            return False
+
+        # 检查参数相似度
+        args = [call[1] for call in recent]
+        similarity_01 = difflib.SequenceMatcher(None, args[0], args[1]).ratio()
+        similarity_12 = difflib.SequenceMatcher(None, args[1], args[2]).ratio()
+
+        return similarity_01 > 0.8 and similarity_12 > 0.8
+
     async def _execute_tool(self, tool_call: ToolCall) -> str:
         """执行单个工具调用，返回结果字符串。
 
@@ -630,7 +681,7 @@ class AgentLoop:
         """根据 provider 类型返回对应格式的工具定义。
 
         - AnthropicProvider → to_anthropic_format()
-        - 其他（DeepSeek 等 OpenAI 兼容）→ to_openai_format()
+        - 其他（OpenAICompatProvider 等 OpenAI 兼容）→ to_openai_format()
 
         Returns:
             工具定义列表（provider 原生格式）。
@@ -640,7 +691,7 @@ class AgentLoop:
                 list[dict[str, Any]],
                 self.tool_registry.to_anthropic_format(),
             )
-        # 默认使用 OpenAI 格式（DeepSeek 及其他兼容 provider）
+        # 默认使用 OpenAI 格式（OpenAICompatProvider 及其他兼容 provider）
         return cast(
             list[dict[str, Any]],
             self.tool_registry.to_openai_format(),
@@ -650,7 +701,7 @@ class AgentLoop:
         """根据 provider 类型返回工具结果消息的角色。
 
         - AnthropicProvider → "user"（tool_result 作为 user 消息的 content block）
-        - 其他（DeepSeek 等 OpenAI 兼容）→ "tool"
+        - 其他（OpenAICompatProvider 等 OpenAI 兼容）→ "tool"
 
         Returns:
             工具结果消息角色字符串。

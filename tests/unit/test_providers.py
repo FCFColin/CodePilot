@@ -19,7 +19,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from codepilot.config import AnthropicConfig, DeepSeekConfig
+from codepilot.config import AnthropicConfig, DeepSeekConfig, ProviderConfig
 from codepilot.exceptions import ProviderError
 from codepilot.providers.anthropic import AnthropicProvider
 from codepilot.providers.base import (
@@ -30,7 +30,7 @@ from codepilot.providers.base import (
     ToolCall,
     Usage,
 )
-from codepilot.providers.deepseek import DeepSeekProvider
+from codepilot.providers.openai_compat import OpenAICompatProvider
 
 # ============================================================================
 # 常量与辅助函数
@@ -43,6 +43,18 @@ _ANTHROPIC_URL = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic/v1/me
 def _deepseek_config() -> DeepSeekConfig:
     """构造测试用 DeepSeek 配置。"""
     return DeepSeekConfig(api_key=SecretStr("sk-test-deepseek"))
+
+
+def _provider_config() -> ProviderConfig:
+    """构造测试用 OpenAI 兼容 ProviderConfig。"""
+    return ProviderConfig(
+        type="openai",
+        api_key=SecretStr("sk-test-deepseek"),
+        base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+        model="astron-code-latest",
+        temperature=1.0,
+        top_p=1.0,
+    )
 
 
 def _anthropic_config() -> AnthropicConfig:
@@ -174,7 +186,7 @@ class TestFormatToolResult:
 
     def test_deepseek_format_tool_result(self) -> None:
         """DeepSeek 工具结果为 OpenAI tool 消息格式。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         result = provider.format_tool_result(
             role="tool",
             tool_call_id="call_123",
@@ -213,7 +225,7 @@ class TestFormatAssistantMessage:
 
     def test_deepseek_no_tool_calls(self) -> None:
         """DeepSeek 无工具调用时仅含 role 和 content。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         result = provider.format_assistant_message("你好", [])
         assert result["role"] == "assistant"
         assert result["content"] == "你好"
@@ -221,7 +233,7 @@ class TestFormatAssistantMessage:
 
     def test_deepseek_with_tool_calls(self) -> None:
         """DeepSeek 有工具调用时包含 tool_calls 列表。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         calls = [
             ToolCall(id="call_1", name="get_weather", arguments={"city": "SF"}),
             ToolCall(id="call_2", name="get_time", arguments={}),
@@ -285,7 +297,7 @@ class TestConvertMessages:
 
     def test_deepseek_convert_str_content(self) -> None:
         """DeepSeek 字符串 content 转为标准格式。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         messages = [
             Message(role="user", content="你好"),
             Message(role="assistant", content="你好，有什么可以帮你？"),
@@ -300,7 +312,7 @@ class TestConvertMessages:
 
     def test_deepseek_convert_nested_dict_content(self) -> None:
         """DeepSeek 嵌套 dict content（含 role 键）被提取。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         # 模拟 format_assistant_message 输出存为 content
         inner = {"role": "assistant", "content": "回复", "tool_calls": []}
         messages = [Message(role="assistant", content=inner)]
@@ -309,7 +321,7 @@ class TestConvertMessages:
 
     def test_deepseek_convert_raw_dict(self) -> None:
         """DeepSeek 原始 dict 透传，嵌套 dict content 被提取。"""
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
         # 原始 dict（如 format_tool_result 输出）
         tool_msg = {
             "role": "tool",
@@ -394,7 +406,7 @@ class TestStreamingParse:
             respx.post(_DEEPSEEK_URL).mock(
                 return_value=_sse_response(_openai_sse(chunks))
             )
-            provider = DeepSeekProvider(_deepseek_config())
+            provider = OpenAICompatProvider(_provider_config())
             events = await _collect(provider.chat([Message(role="user", content="hi")]))
         # 验证事件序列
         assert isinstance(events[0], TextDelta)
@@ -433,7 +445,7 @@ class TestStreamingParse:
             respx.post(_DEEPSEEK_URL).mock(
                 return_value=_sse_response(_openai_sse(chunks))
             )
-            provider = DeepSeekProvider(_deepseek_config())
+            provider = OpenAICompatProvider(_provider_config())
             events = await _collect(provider.chat([Message(role="user", content="hi")]))
         assert isinstance(events[0], ThinkingDelta)
         assert events[0].text == "思考中..."
@@ -495,7 +507,7 @@ class TestStreamingParse:
             respx.post(_DEEPSEEK_URL).mock(
                 return_value=_sse_response(_openai_sse(chunks))
             )
-            provider = DeepSeekProvider(_deepseek_config())
+            provider = OpenAICompatProvider(_provider_config())
             events = await _collect(
                 provider.chat([Message(role="user", content="天气?")])
             )
@@ -524,7 +536,7 @@ class TestStreamingParse:
         }
         with respx.mock:
             respx.post(_DEEPSEEK_URL).mock(return_value=_json_response(resp))
-            provider = DeepSeekProvider(_deepseek_config())
+            provider = OpenAICompatProvider(_provider_config())
             events = await _collect(
                 provider.chat([Message(role="user", content="hi")], stream=False)
             )
@@ -796,8 +808,8 @@ class TestErrorHandling:
                     },
                 )
             )
-            provider = DeepSeekProvider(_deepseek_config())
-            with pytest.raises(ProviderError, match="DeepSeek"):
+            provider = OpenAICompatProvider(_provider_config())
+            with pytest.raises(ProviderError, match="OpenAI 兼容"):
                 await _collect(provider.chat([Message(role="user", content="hi")]))
 
     async def test_deepseek_stream_options_fallback(
@@ -805,7 +817,7 @@ class TestErrorHandling:
     ) -> None:
         """stream_options 不被支持时回退移除该参数并重试成功。"""
 
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
 
         # 构造成功的流式响应
         chunks = [
@@ -859,7 +871,7 @@ class TestErrorHandling:
     ) -> None:
         """stream_options 回退后仍然失败时抛出 ProviderError。"""
 
-        provider = DeepSeekProvider(_deepseek_config())
+        provider = OpenAICompatProvider(_provider_config())
 
         call_count = 0
 
@@ -877,7 +889,7 @@ class TestErrorHandling:
             provider, "_create_completion", _mock_create_completion
         )
 
-        with pytest.raises(ProviderError, match="DeepSeek"):
+        with pytest.raises(ProviderError, match="OpenAI 兼容"):
             await _collect(
                 provider.chat([Message(role="user", content="hi")])
             )

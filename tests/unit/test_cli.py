@@ -57,10 +57,10 @@ class TestParseArgs:
         args = parse_args(["--provider", "deepseek"])
         assert args.provider == "deepseek"
 
-    def test_provider_invalid_choice(self) -> None:
-        """--provider 无效值时 argparse 报错退出。"""
-        with pytest.raises(SystemExit):
-            parse_args(["--provider", "invalid"])
+    def test_provider_custom_name(self) -> None:
+        """--provider 接受任意字符串。"""
+        args = parse_args(["--provider", "my-custom-provider"])
+        assert args.provider == "my-custom-provider"
 
     def test_model_arg(self) -> None:
         """--model 参数被正确解析。"""

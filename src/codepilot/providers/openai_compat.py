@@ -1,6 +1,6 @@
-"""DeepSeek Provider 实现。
+"""OpenAI 兼容 Provider 实现。
 
-基于 openai Python SDK，通过 OpenAI 兼容接口调用 DeepSeek API。
+基于 openai Python SDK，通过 OpenAI 兼容接口调用任意 OpenAI 兼容 API。
 支持流式响应、工具调用、深度思考模式。
 
 特性：
@@ -25,7 +25,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from codepilot.config import DeepSeekConfig
+from codepilot.config import ProviderConfig
 from codepilot.exceptions import ProviderError
 from codepilot.providers.base import (
     AgentEvent,
@@ -44,15 +44,15 @@ from codepilot.providers.base import (
 logger = structlog.get_logger(__name__)
 
 
-class DeepSeekProvider(BaseProvider):
-    """DeepSeek Provider，基于 openai SDK 的 OpenAI 兼容接口。"""
+class OpenAICompatProvider(BaseProvider):
+    """OpenAI 兼容 Provider，基于 openai SDK 的 OpenAI 兼容接口。"""
 
-    def __init__(self, config: DeepSeekConfig) -> None:
+    def __init__(self, config: ProviderConfig) -> None:
         self.config = config
-        # 创建异步 OpenAI 客户端，base_url 指向 DeepSeek 兼容端点
+        # 创建异步 OpenAI 客户端，base_url 指向兼容端点
         # max_retries=0 禁用 SDK 内置重试，由 tenacity 统一管理重试
         logger.debug(
-            "DeepSeek Provider 初始化",
+            "OpenAI 兼容 Provider 初始化",
             base_url=config.base_url,
             model=config.model,
         )
@@ -105,7 +105,7 @@ class DeepSeekProvider(BaseProvider):
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         logger.debug(
-            "发起 DeepSeek 请求",
+            "发起 OpenAI 兼容请求",
             model=self.config.model,
             message_count=len(request_messages),
             stream=stream,
@@ -123,15 +123,19 @@ class DeepSeekProvider(BaseProvider):
                     "stream_options 不被支持，去掉后重试",
                     error=str(e),
                 )
-                kwargs_fallback = {k: v for k, v in kwargs.items() if k != "stream_options"}
+                kwargs_fallback = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if k != "stream_options"
+                }
                 try:
                     response = await self._create_completion(**kwargs_fallback)
                 except openai.APIError as e2:
-                    logger.error("DeepSeek API 调用失败", error=str(e2))
-                    raise ProviderError(f"DeepSeek API 调用失败: {e2}") from e2
+                    logger.error("OpenAI 兼容 API 调用失败", error=str(e2))
+                    raise ProviderError(f"OpenAI 兼容 API 调用失败: {e2}") from e2
             else:
-                logger.error("DeepSeek API 调用失败", error=str(e))
-                raise ProviderError(f"DeepSeek API 调用失败: {e}") from e
+                logger.error("OpenAI 兼容 API 调用失败", error=str(e))
+                raise ProviderError(f"OpenAI 兼容 API 调用失败: {e}") from e
 
         # 解析响应
         if stream:
@@ -186,7 +190,7 @@ class DeepSeekProvider(BaseProvider):
                 if delta and delta.content:
                     yield TextDelta(text=delta.content)
 
-                # 思考内容（thinking 模式，DeepSeek 扩展字段）
+                # 思考内容（thinking 模式，扩展字段）
                 if delta:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
@@ -233,8 +237,8 @@ class DeepSeekProvider(BaseProvider):
                             )
                     yield Done(stop_reason=choice.finish_reason)
         except openai.APIError as e:
-            logger.error("DeepSeek 流式解析失败", error=str(e))
-            raise ProviderError(f"DeepSeek 流式解析失败: {e}") from e
+            logger.error("OpenAI 兼容流式解析失败", error=str(e))
+            raise ProviderError(f"OpenAI 兼容流式解析失败: {e}") from e
 
     async def _iter_non_stream(self, response: Any) -> AsyncIterator[AgentEvent]:
         """解析非流式响应为 AgentEvent。"""
@@ -367,4 +371,7 @@ class DeepSeekProvider(BaseProvider):
         }
 
 
-__all__ = ["DeepSeekProvider"]
+# 向后兼容别名
+DeepSeekProvider = OpenAICompatProvider
+
+__all__ = ["OpenAICompatProvider", "DeepSeekProvider"]

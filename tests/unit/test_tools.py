@@ -539,10 +539,10 @@ class TestToolRegistry:
         assert "input_schema" in fmt
 
     def test_create_default_registry(self, tmp_path: Path) -> None:
-        """create_default_registry 创建包含 7 个工具的注册表。"""
+        """create_default_registry 创建包含 10 个工具的注册表。"""
         registry = ToolRegistry.create_default_registry(workspace_root=str(tmp_path))
         tools = registry.list_tools()
-        assert len(tools) == 7
+        assert len(tools) == 10
         names = {t.name for t in tools}
         expected = {
             "read_file",
@@ -551,7 +551,10 @@ class TestToolRegistry:
             "list_files",
             "shell_exec",
             "search_code",
+            "web_fetch",
             "get_context",
+            "diagnose",
+            "plan",
         }
         assert names == expected
 

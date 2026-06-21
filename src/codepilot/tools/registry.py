@@ -259,7 +259,7 @@ class ToolRegistry:
         workspace_root: str | None = None,
         require_approval_for: list[str] | None = None,
     ) -> ToolRegistry:
-        """创建包含全部 7 个工具的默认注册表。
+        """创建包含全部 10 个工具的默认注册表。
 
         Args:
             context_manager: 可选的上下文管理器，注入 GetContextTool。
@@ -267,15 +267,18 @@ class ToolRegistry:
             require_approval_for: 需审批的操作类型列表，None 时使用默认值。
 
         Returns:
-            包含 7 个工具的 ToolRegistry 实例。
+            包含 10 个工具的 ToolRegistry 实例。
         """
         # 延迟导入避免循环依赖
+        from codepilot.tools.diagnose import DiagnoseTool
         from codepilot.tools.file_edit import EditFileTool
         from codepilot.tools.file_read import ReadFileTool
         from codepilot.tools.file_write import WriteFileTool
         from codepilot.tools.list_files import ListFilesTool
+        from codepilot.tools.plan_tool import PlanTool
         from codepilot.tools.search_code import SearchCodeTool
         from codepilot.tools.shell_exec import ShellExecTool
+        from codepilot.tools.web_fetch import WebFetchTool
 
         ws = workspace_root or "."
         rap = (
@@ -291,7 +294,10 @@ class ToolRegistry:
         registry.register(ListFilesTool(workspace_root=ws, require_approval_for=rap))
         registry.register(ShellExecTool(workspace_root=ws, require_approval_for=rap))
         registry.register(SearchCodeTool(workspace_root=ws, require_approval_for=rap))
+        registry.register(WebFetchTool())
         registry.register(GetContextTool(context_manager=context_manager))
+        registry.register(DiagnoseTool())
+        registry.register(PlanTool())
         logger.info("默认工具注册表已创建", count=len(registry._tools))
         return registry
 

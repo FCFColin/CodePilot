@@ -32,7 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("prompt", nargs="?", help="单次执行模式的提示词")
     parser.add_argument(
-        "--provider", choices=["deepseek", "anthropic"], help="LLM provider"
+        "--provider", help="LLM provider 名称（需在配置文件 providers 段中定义）"
     )
     parser.add_argument("--model", help="模型名")
     parser.add_argument("--api-key", help="API Key")
