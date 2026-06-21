@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flask Demo 应用</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+        }
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 2.5rem;
+            max-width: 700px;
+            width: 100%;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+        }
+        h1 {
+            color: #333;
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+        }
+        .endpoints {
+            list-style: none;
+        }
+        .endpoints li {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 1rem 1.2rem;
+            margin-bottom: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .endpoints li:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+        .method {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            min-width: 48px;
+            text-align: center;
+        }
+        .method-get {
+            background: #d4edda;
+            color: #155724;
+        }
+        .method-post {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .route {
+            font-family: "SF Mono", "Fira Code", "Fira Mono", monospace;
+            font-size: 0.95rem;
+            color: #333;
+            flex: 1;
+        }
+        .desc {
+            color: #888;
+            font-size: 0.85rem;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #eee;
+            margin: 1.5rem 0;
+        }
+        .footer {
+            text-align: center;
+            color: #999;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+        }
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🚀 Flask Demo</h1>
+        <p class="subtitle">一个简洁的 Flask Web 应用示例</p>
+
+        <h2 style="font-size:1.2rem; margin-bottom:1rem; color:#555;">
+            可用端点
+        </h2>
+        <ul class="endpoints">
+            <li>
+                <span class="method method-get">GET</span>
+                <span class="route">/</span>
+                <span class="desc">首页（当前页面）</span>
+            </li>
+            <li>
+                <span class="method method-get">GET</span>
+                <span class="route">/api/hello?name=xxx</span>
+                <span class="desc">JSON 问候</span>
+            </li>
+            <li>
+                <span class="method method-get">GET</span>
+                <span class="route">/api/time</span>
+                <span class="desc">当前时间戳</span>
+            </li>
+            <li>
+                <span class="method method-post">POST</span>
+                <span class="route">/api/echo</span>
+                <span class="desc">回显 JSON 数据</span>
+            </li>
+        </ul>
+
+        <hr />
+
+        <div class="footer">
+            Powered by
+            <a href="https://flask.palletsprojects.com/" target="_blank">Flask</a>
+            &amp;
+            <a href="https://jinja.palletsprojects.com/" target="_blank">Jinja2</a>
+        </div>
+    </div>
+</body>
+</html>
