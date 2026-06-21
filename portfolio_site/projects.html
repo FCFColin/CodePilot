@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Alex Chen 的项目作品集 - Web应用、可视化、开源项目">
+  <title>作品集 | Alex Chen</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ========== 导航栏 ========== -->
+  <nav class="navbar" role="navigation" aria-label="主导航">
+    <div class="navbar-inner">
+      <a href="index.html" class="navbar-logo">Alex.dev</a>
+      <button class="navbar-toggle" aria-label="切换菜单" onclick="toggleMenu()">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <ul class="navbar-links" id="navLinks">
+        <li><a href="index.html">首页</a></li>
+        <li><a href="projects.html" class="active">作品</a></li>
+        <li><a href="about.html">关于</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ========== 主内容 ========== -->
+  <main>
+    <!-- 页面横幅 -->
+    <section class="page-banner">
+      <div class="container page-banner-content">
+        <span class="section-label animate-fade-in-up">Portfolio</span>
+        <h1 class="section-title animate-fade-in-up delay-1">我的作品集</h1>
+        <p class="section-desc animate-fade-in-up delay-2">从想法到落地，每个项目都承载着独特的技术挑战与创意表达</p>
+      </div>
+    </section>
+
+    <!-- 筛选标签 -->
+    <section class="section" style="padding-top: 0;">
+      <div class="container">
+        <div style="display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; margin-bottom: 3rem;">
+          <button class="tag" style="cursor: pointer; padding: 0.5rem 1.2rem; font-size: 0.85rem; border-color: var(--color-accent); background: rgba(108,99,255,0.15);" onclick="filterProjects('all')">全部</button>
+          <button class="tag" style="cursor: pointer; padding: 0.5rem 1.2rem; font-size: 0.85rem;" onclick="filterProjects('frontend')">前端</button>
+          <button class="tag" style="cursor: pointer; padding: 0.5rem 1.2rem; font-size: 0.85rem;" onclick="filterProjects('fullstack')">全栈</button>
+          <button class="tag" style="cursor: pointer; padding: 0.5rem 1.2rem; font-size: 0.85rem;" onclick="filterProjects('backend')">后端</button>
+          <button class="tag" style="cursor: pointer; padding: 0.5rem 1.2rem; font-size: 0.85rem;" onclick="filterProjects('opensource')">开源</button>
+        </div>
+
+        <!-- 项目列表 -->
+        <div class="projects-grid" id="projectsGrid">
+
+          <!-- 项目 1 -->
+          <article class="project-card animate-fade-in-up delay-1" data-category="frontend">
+            <div class="project-card-image">🎨</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">React</span>
+                <span class="tag">Three.js</span>
+                <span class="tag">WebGL</span>
+              </div>
+              <h3 class="project-card-title">3D 创意画板</h3>
+              <p class="project-card-desc">基于 WebGL 的在线 3D 建模工具，支持实时协作、材质编辑和多视角渲染。用户可以通过直觉式手势创建复杂的 3D 场景。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2024 · 前端</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 2 -->
+          <article class="project-card animate-fade-in-up delay-2" data-category="fullstack">
+            <div class="project-card-image">📊</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Vue 3</span>
+                <span class="tag">D3.js</span>
+                <span class="tag">Python</span>
+              </div>
+              <h3 class="project-card-title">智能数据仪表盘</h3>
+              <p class="project-card-desc">实时数据可视化平台，集成机器学习预测模型。支持 20+ 图表类型、自定义看板和自动化报告导出。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2024 · 全栈</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 3 -->
+          <article class="project-card animate-fade-in-up delay-3" data-category="backend">
+            <div class="project-card-image">⚡</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Node.js</span>
+                <span class="tag">GraphQL</span>
+                <span class="tag">Redis</span>
+              </div>
+              <h3 class="project-card-title">高并发 API 网关</h3>
+              <p class="project-card-desc">企业级 API 网关服务，支持限流、熔断、负载均衡。单节点 QPS 达 50k+，已服务千万级请求。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2023 · 后端</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 4 -->
+          <article class="project-card animate-fade-in-up delay-1" data-category="fullstack">
+            <div class="project-card-image">🛒</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Next.js</span>
+                <span class="tag">Stripe</span>
+                <span class="tag">PostgreSQL</span>
+              </div>
+              <h3 class="project-card-title">电商 SaaS 平台</h3>
+              <p class="project-card-desc">面向中小商家的全功能电商平台，集成支付、库存管理和数据分析。支持多语言和多货币。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2023 · 全栈</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 5 -->
+          <article class="project-card animate-fade-in-up delay-2" data-category="opensource">
+            <div class="project-card-image">🔧</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">TypeScript</span>
+                <span class="tag">Rollup</span>
+                <span class="tag">Vitest</span>
+              </div>
+              <h3 class="project-card-title">LiteUI 组件库</h3>
+              <p class="project-card-desc">轻量级 React UI 组件库，gzip 后仅 12kB。提供 40+ 精心设计的组件，支持主题定制和暗色模式。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2023 · 开源 · ⭐ 2.8k</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 6 -->
+          <article class="project-card animate-fade-in-up delay-3" data-category="frontend">
+            <div class="project-card-image">🎵</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Svelte</span>
+                <span class="tag">Web Audio</span>
+                <span class="tag">Canvas</span>
+              </div>
+              <h3 class="project-card-title">音乐可视化器</h3>
+              <p class="project-card-desc">实时音频可视化应用，支持频谱分析、波形渲染和粒子特效。可连接麦克风或播放本地音乐。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2022 · 前端</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 7 -->
+          <article class="project-card animate-fade-in-up delay-1" data-category="backend">
+            <div class="project-card-image">🤖</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Python</span>
+                <span class="tag">FastAPI</span>
+                <span class="tag">Docker</span>
+              </div>
+              <h3 class="project-card-title">AI 内容生成引擎</h3>
+              <p class="project-card-desc">基于大语言模型的内容生成服务，支持文章、代码、图片描述等多种输出。提供 RESTful API 和 SDK。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2024 · 后端</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+          <!-- 项目 8 -->
+          <article class="project-card animate-fade-in-up delay-2" data-category="opensource">
+            <div class="project-card-image">📦</div>
+            <div class="project-card-body">
+              <div class="project-card-tags">
+                <span class="tag">Rust</span>
+                <span class="tag">WASM</span>
+                <span class="tag">CLI</span>
+              </div>
+              <h3 class="project-card-title">Speedy 构建工具</h3>
+              <p class="project-card-desc">用 Rust 编写的超快前端构建工具，冷启动 < 100ms。兼容 ESBuild 插件生态，支持 HMR。</p>
+            </div>
+            <div class="project-card-footer">
+              <span style="color: var(--color-text-muted); font-size: 0.8rem;">2022 · 开源 · ⭐ 5.2k</span>
+              <a href="#" class="project-card-link">查看详情 →</a>
+            </div>
+          </article>
+
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ========== 页脚 ========== -->
+  <footer class="footer" role="contentinfo">
+    <div class="footer-inner">
+      <ul class="footer-links">
+        <li><a href="index.html">首页</a></li>
+        <li><a href="projects.html">作品</a></li>
+        <li><a href="about.html">关于</a></li>
+      </ul>
+      <div class="footer-social">
+        <a href="#" aria-label="GitHub">💻</a>
+        <a href="#" aria-label="Twitter">🐦</a>
+        <a href="#" aria-label="Email">📧</a>
+        <a href="#" aria-label="LinkedIn">🔗</a>
+      </div>
+      <p class="footer-copy">© 2024 Alex Chen. 用 ❤️ 和代码构建</p>
+    </div>
+  </footer>
+
+  <!-- ========== 脚本 ========== -->
+  <script>
+    // 移动端导航菜单切换
+    function toggleMenu() {
+      document.getElementById('navLinks').classList.toggle('open');
+    }
+
+    document.querySelectorAll('.navbar-links a').forEach(link => {
+      link.addEventListener('click', () => {
+        document.getElementById('navLinks').classList.remove('open');
+      });
+    });
+
+    // 滚动时导航栏背景加深
+    window.addEventListener('scroll', () => {
+      const navbar = document.querySelector('.navbar');
+      navbar.style.background = window.scrollY > 50
+        ? 'rgba(10, 10, 15, 0.95)'
+        : 'rgba(10, 10, 15, 0.85)';
+    });
+
+    // 项目筛选
+    function filterProjects(category) {
+      // 更新筛选按钮样式
+      document.querySelectorAll('.tag[style]').forEach(btn => {
+        btn.style.borderColor = 'rgba(108, 99, 255, 0.2)';
+        btn.style.background = 'rgba(108, 99, 255, 0.1)';
+      });
+      event.target.style.borderColor = 'var(--color-accent)';
+      event.target.style.background = 'rgba(108, 99, 255, 0.15)';
+
+      // 筛选卡片
+      const cards = document.querySelectorAll('.project-card');
+      cards.forEach(card => {
+        if (category === 'all' || card.dataset.category === category) {
+          card.style.display = '';
+          card.style.animation = 'fadeInUp 0.4s ease forwards';
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+
+    // Intersection Observer 滚动动画
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.animationPlayState = 'running';
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.animate-fade-in-up').forEach(el => {
+      el.style.animationPlayState = 'paused';
+      observer.observe(el);
+    });
+  </script>
+
+</body>
+</html>
