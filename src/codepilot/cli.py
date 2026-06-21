@@ -2,6 +2,7 @@
 
 完整集成：parse_args → load_config → create_app → REPL/单次执行。
 支持 Ctrl+C 优雅退出、CodePilotError 错误处理。
+支持 -c/--continue 断点续跑、-r/--resume 指定会话恢复。
 """
 
 from __future__ import annotations
@@ -39,8 +40,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-approve", action="store_true", help="禁用审批（YOLO 模式）"
     )
+    parser.add_argument(
+        "--no-auto-commit",
+        action="store_true",
+        help="禁用 Git 自动提交",
+    )
     parser.add_argument("--config", help="配置文件路径")
     parser.add_argument("--verbose", action="store_true", help="详细日志")
+    parser.add_argument(
+        "-c",
+        "--continue",
+        dest="continue_last",
+        action="store_true",
+        help="继续最近一次会话（断点续跑）",
+    )
+    parser.add_argument(
+        "-r",
+        "--resume",
+        dest="resume_session",
+        metavar="SESSION_ID",
+        help="恢复指定 session_id 的会话",
+    )
     parser.add_argument(
         "--version", action="version", version=f"CodePilot v{__version__}"
     )
@@ -73,6 +93,12 @@ def main(argv: list[str] | None = None) -> None:
     except CodePilotError as e:
         sys.stderr.write(f"初始化失败: {e}\n")
         sys.exit(1)
+
+    # 断点续跑：-c 加载最近会话，-r 加载指定会话
+    if args.resume_session:
+        asyncio.run(app.resume_from_history(args.resume_session))
+    elif args.continue_last:
+        asyncio.run(app.resume_from_history())
 
     # 运行 REPL 或单次执行
     try:

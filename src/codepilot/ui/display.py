@@ -640,6 +640,8 @@ class DisplayManager:
             ("/provider <p>", "切换 provider（deepseek/anthropic）"),
             ("/approve", "切换自动批准模式（YOLO 模式）"),
             ("/undo", "撤销最近的文件操作"),
+            ("/sessions", "显示最近 10 个会话"),
+            ("/export [md|json]", "导出当前会话到文件"),
             ("/quit 或 /exit", "退出"),
         ]
         for cmd, desc in commands:
@@ -649,6 +651,59 @@ class DisplayManager:
         panel = Panel(
             content,
             title="Help",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        self.console.print(panel)
+
+    def show_sessions(self, sessions: list[dict[str, Any]]) -> None:
+        """显示最近会话列表（/sessions 命令）。
+
+        Args:
+            sessions: SessionRecord 列表（按 start_time 降序）。
+        """
+        self._stop_live()
+
+        if not sessions:
+            self.console.print(
+                Panel(
+                    Text("(无历史会话)", style="dim italic"),
+                    title="Sessions",
+                    border_style="cyan",
+                    padding=(0, 1),
+                )
+            )
+            return
+
+        content = Text()
+        content.append(
+            Text(f"=== 最近 {len(sessions)} 个会话 ===\n\n", style="bold cyan")
+        )
+        content.append(
+            Text(
+                f"{'#':<4} {'Session ID':<24} {'时间':<26} {'轮次':<6} {'Token'}\n",
+                style="bold yellow",
+            )
+        )
+
+        for i, record in enumerate(sessions, 1):
+            session_id = record.get("session_id", "")
+            start_time = record.get("start_time", "")[:19]
+            messages = record.get("messages", [])
+            # 轮次 = user 消息数
+            turns = sum(1 for m in messages if m.get("role") == "user")
+            token_usage = record.get("token_usage", {})
+            total_tokens = token_usage.get("total", 0)
+            content.append(
+                Text(
+                    f"{i:<4} {session_id:<24} {start_time:<26} "
+                    f"{turns:<6} {total_tokens}\n"
+                )
+            )
+
+        panel = Panel(
+            content,
+            title="Sessions",
             border_style="cyan",
             padding=(0, 1),
         )

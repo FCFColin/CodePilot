@@ -243,6 +243,37 @@ class TestDisplayManager:
         result = output.getvalue()
         assert "无对话历史" in result
 
+    def test_show_sessions_empty(self) -> None:
+        """show_sessions 无会话时输出空提示。"""
+        display, output = _make_display()
+        display.show_sessions([])
+        result = output.getvalue()
+        assert "无历史会话" in result
+
+    def test_show_sessions_with_data(self) -> None:
+        """show_sessions 有会话时输出会话列表。"""
+        display, output = _make_display()
+        sessions: list[dict[str, Any]] = [
+            {
+                "session_id": "abc12345-1700000000",
+                "start_time": "2026-01-01T10:00:00",
+                "end_time": None,
+                "workspace_root": "/tmp",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ],
+                "tool_calls": [],
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total": 15},
+                "provider": "deepseek",
+                "model": "test-model",
+            }
+        ]
+        display.show_sessions(sessions)
+        result = output.getvalue()
+        assert "abc12345-1700000000" in result
+        assert "2026-01-01T10:00:00" in result
+
     def test_show_history_with_messages(self) -> None:
         """show_history 有消息时输出历史概要。"""
         display, output = _make_display()

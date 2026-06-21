@@ -672,3 +672,166 @@ class TestAgentLoop:
         assert "LLM 调用失败" in ui.errors[0]
         assert "error: rate limited" in result
         assert ui.turn_ends == 1
+
+
+# ============================================================================
+# RepoMap 集成测试
+# ============================================================================
+
+
+class _SystemPromptCapturingProvider(MockProvider):
+    """捕获 chat 调用时收到的 system_prompt。"""
+
+    def __init__(self, event_sequences: list[list[Any]]) -> None:
+        super().__init__(event_sequences)
+        self.captured_system_prompts: list[str] = []
+
+    async def chat(
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None = None,
+        system_prompt: str = "",
+        stream: bool = True,
+    ) -> AsyncIterator[Any]:
+        self.captured_system_prompts.append(system_prompt)
+        async for event in super().chat(messages, tools, system_prompt, stream):
+            yield event
+
+
+class _MockRepoMapper:
+    """模拟 RepoMapper，返回固定的摘要文本。"""
+
+    def build_for_query(self, query: str) -> str:
+        return f"mock_repo_map_for:{query}"
+
+    def is_available(self) -> bool:
+        return True
+
+
+class TestRepoMapIntegration:
+    """RepoMap 与 AgentLoop 集成测试。"""
+
+    async def test_repo_mapper_appends_summary_to_system_prompt(self) -> None:
+        """repo_mapper 不为 None 时系统提示追加仓库结构摘要。"""
+        provider = _SystemPromptCapturingProvider(
+            event_sequences=[
+                [
+                    TextDelta(text="ok"),
+                    Done(stop_reason="end_turn"),
+                ],
+            ]
+        )
+        registry = ToolRegistry()
+        cm = _make_context_manager()
+        ui = MockUICallback()
+        loop = AgentLoop(
+            provider=provider,
+            context_manager=cm,
+            tool_registry=registry,
+            ui_callback=ui,
+            system_prompt="BASE_PROMPT",
+            repo_mapper=_MockRepoMapper(),
+        )
+
+        await loop.run("hello world")
+
+        assert len(provider.captured_system_prompts) >= 1
+        prompt = provider.captured_system_prompts[0]
+        assert "BASE_PROMPT" in prompt
+        assert "## 当前仓库结构摘要" in prompt
+        assert "mock_repo_map_for:hello world" in prompt
+
+    async def test_no_repo_mapper_keeps_original_system_prompt(self) -> None:
+        """repo_mapper 为 None 时系统提示保持原样。"""
+        provider = _SystemPromptCapturingProvider(
+            event_sequences=[
+                [
+                    TextDelta(text="ok"),
+                    Done(stop_reason="end_turn"),
+                ],
+            ]
+        )
+        registry = ToolRegistry()
+        cm = _make_context_manager()
+        ui = MockUICallback()
+        loop = AgentLoop(
+            provider=provider,
+            context_manager=cm,
+            tool_registry=registry,
+            ui_callback=ui,
+            system_prompt="BASE_PROMPT",
+            repo_mapper=None,
+        )
+
+        await loop.run("hello")
+
+        assert len(provider.captured_system_prompts) >= 1
+        assert provider.captured_system_prompts[0] == "BASE_PROMPT"
+
+    async def test_repo_mapper_error_falls_back_to_base_prompt(self) -> None:
+        """repo_mapper.build_for_query 抛异常时回退到原始系统提示。"""
+
+        class _ErrorRepoMapper:
+            def build_for_query(self, query: str) -> str:
+                raise RuntimeError("boom")
+
+            def is_available(self) -> bool:
+                return True
+
+        provider = _SystemPromptCapturingProvider(
+            event_sequences=[
+                [
+                    TextDelta(text="ok"),
+                    Done(stop_reason="end_turn"),
+                ],
+            ]
+        )
+        registry = ToolRegistry()
+        cm = _make_context_manager()
+        ui = MockUICallback()
+        loop = AgentLoop(
+            provider=provider,
+            context_manager=cm,
+            tool_registry=registry,
+            ui_callback=ui,
+            system_prompt="BASE_PROMPT",
+            repo_mapper=_ErrorRepoMapper(),
+        )
+
+        await loop.run("hello")
+
+        assert provider.captured_system_prompts[0] == "BASE_PROMPT"
+
+    async def test_repo_mapper_empty_result_keeps_base_prompt(self) -> None:
+        """repo_mapper.build_for_query 返回空字符串时保持原始提示。"""
+
+        class _EmptyRepoMapper:
+            def build_for_query(self, query: str) -> str:
+                return ""
+
+            def is_available(self) -> bool:
+                return True
+
+        provider = _SystemPromptCapturingProvider(
+            event_sequences=[
+                [
+                    TextDelta(text="ok"),
+                    Done(stop_reason="end_turn"),
+                ],
+            ]
+        )
+        registry = ToolRegistry()
+        cm = _make_context_manager()
+        ui = MockUICallback()
+        loop = AgentLoop(
+            provider=provider,
+            context_manager=cm,
+            tool_registry=registry,
+            ui_callback=ui,
+            system_prompt="BASE_PROMPT",
+            repo_mapper=_EmptyRepoMapper(),
+        )
+
+        await loop.run("hello")
+
+        assert provider.captured_system_prompts[0] == "BASE_PROMPT"

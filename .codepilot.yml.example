@@ -90,3 +90,10 @@ ui:
   show_thinking: true                # 显示模型思考过程（如果有）
   spinner_style: "dots"              # 加载动画样式
   max_diff_lines: 50                 # diff显示最大行数
+
+# ===== Repo Map 配置（可选功能，需安装 repomap 可选依赖）=====
+repomap:
+  enabled: true                      # 是否启用仓库结构摘要
+  max_tokens: 1024                   # 摘要最大 token 数
+  languages:                         # 支持的语言（当前仅 python）
+    - "python"

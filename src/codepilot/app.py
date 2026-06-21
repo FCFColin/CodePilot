@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 from prompt_toolkit import PromptSession
@@ -23,11 +24,15 @@ from codepilot.context.compressor import CompressionStrategy, ContextCompressor
 from codepilot.context.manager import ContextManager
 from codepilot.context.token_counter import TokenCounter
 from codepilot.exceptions import CodePilotError
+from codepilot.git import CommitMessageGenerator, GitManager
+from codepilot.hooks import GitCommitHook, HookRegistry, LintHook
 from codepilot.providers.anthropic import AnthropicProvider
 from codepilot.providers.base import BaseProvider
 from codepilot.providers.deepseek import DeepSeekProvider
+from codepilot.repomap import RepoMapper
 from codepilot.security.approval import ApprovalManager
 from codepilot.security.sandbox import Sandbox
+from codepilot.session import SessionExporter, SessionManager, SessionStorage
 from codepilot.tools.registry import (
     ApprovalProtocol,
     BaseTool,
@@ -115,10 +120,11 @@ class UndoTracker:
 
 
 class TrackedToolWrapper(BaseTool):
-    """工具包装器，为文件操作工具添加撤销追踪功能。
+    """工具包装器，为文件操作工具添加撤销追踪与 Git 自动提交功能。
 
     通过装饰器模式包装原有工具，在执行前记录文件原内容，
     支持撤销操作，而不修改原始工具类的实现。
+    执行成功后若启用 Git 自动提交，则调用 GitManager.auto_commit。
     """
 
     def __init__(
@@ -126,6 +132,8 @@ class TrackedToolWrapper(BaseTool):
         tool: BaseTool,
         undo_tracker: UndoTracker,
         workspace_root: str,
+        git_manager: GitManager | None = None,
+        auto_commit_enabled: bool = False,
     ) -> None:
         """初始化工具包装器。
 
@@ -133,10 +141,15 @@ class TrackedToolWrapper(BaseTool):
             tool: 被包装的原始工具（WriteFileTool 或 EditFileTool）。
             undo_tracker: 撤销追踪器实例。
             workspace_root: 工作区根目录，用于解析相对路径。
+            git_manager: 可选的 GitManager 实例，用于自动提交。
+            auto_commit_enabled: 是否启用 Git 自动提交。
         """
         self._tool = tool
         self._undo_tracker = undo_tracker
         self._workspace_root = workspace_root
+        self._git_manager = git_manager
+        self._auto_commit_enabled = auto_commit_enabled
+        self._commit_generator = CommitMessageGenerator()
         # 覆盖类属性，使 name/description 与原始工具一致
         self.name = tool.name
         self.description = tool.description
@@ -151,7 +164,7 @@ class TrackedToolWrapper(BaseTool):
         sandbox: SandboxProtocol | None = None,
         approval: ApprovalProtocol | None = None,
     ) -> str:
-        """执行工具操作，在执行前记录文件原内容。
+        """执行工具操作，在执行前记录文件原内容，成功后自动提交。
 
         Args:
             arguments: 工具参数。
@@ -162,6 +175,8 @@ class TrackedToolWrapper(BaseTool):
             工具执行结果。
         """
         path = arguments.get("path", "")
+        abs_path = ""
+        is_new_file = False
         if path:
             # 解析绝对路径
             if os.path.isabs(path):
@@ -170,10 +185,27 @@ class TrackedToolWrapper(BaseTool):
                 abs_path = os.path.realpath(os.path.join(self._workspace_root, path))
             # 记录原内容到撤销追踪器
             old_content = self._undo_tracker._read_file(abs_path)
+            is_new_file = old_content is None
             self._undo_tracker._stack.append((abs_path, old_content))
 
         # 委托给原始工具执行
-        return await self._tool.execute(arguments, sandbox, approval)
+        result = await self._tool.execute(arguments, sandbox, approval)
+
+        # 执行成功后自动提交到 Git
+        if (
+            path
+            and self._auto_commit_enabled
+            and self._git_manager is not None
+            and self._git_manager.is_git_repo()
+            and not result.startswith("Error")
+        ):
+            # 使用规则生成提交信息
+            action = "add" if is_new_file else "update"
+            diff_summary = f"{action} {path}"
+            commit_message = self._commit_generator.generate(diff_summary)
+            self._git_manager.auto_commit(commit_message, [Path(abs_path)])
+
+        return result
 
     def to_openai_format(self) -> Any:
         """转换为 OpenAI 格式，委托给原始工具。"""
@@ -237,6 +269,9 @@ class App:
         # 7. 创建撤销追踪器
         self.undo_tracker = UndoTracker()
 
+        # 7.5 创建 GitManager（用于自动提交与撤销）
+        self.git_manager = GitManager(Path(config.security.workspace_root))
+
         # 8. 创建工具注册表并包装需要追踪的工具
         self.tool_registry = self._create_tool_registry(config)
 
@@ -247,7 +282,29 @@ class App:
             context_manager=self.context_manager,
         )
 
-        # 10. 创建 AgentLoop
+        # 10. 创建 SessionManager（会话持久化）
+        self.session_storage = SessionStorage()
+        self.session_manager = SessionManager(
+            storage=self.session_storage,
+            provider=config.provider,
+            model=(
+                config.anthropic.model
+                if config.provider == "anthropic"
+                else config.deepseek.model
+            ),
+            workspace_root=Path(config.security.workspace_root),
+        )
+        self.session_exporter = SessionExporter()
+        # 开始新会话
+        self.session_manager.start_session()
+
+        # 11. 创建 HookRegistry（Lint 反馈循环与自动 Git 提交）
+        self.hook_registry = self._create_hook_registry(config)
+
+        # 11.5 创建 RepoMapper（可选；tree-sitter 不可用时为 None）
+        self.repo_mapper = self._create_repo_mapper(config)
+
+        # 12. 创建 AgentLoop
         self.agent_loop = AgentLoop(
             provider=self.provider,
             context_manager=self.context_manager,
@@ -256,6 +313,10 @@ class App:
             approval=self.approval,
             ui_callback=self.display,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
+            session_manager=self.session_manager,
+            hook_registry=self.hook_registry,
+            max_lint_retries=config.hooks.max_lint_retries,
+            repo_mapper=self.repo_mapper,
         )
 
     @staticmethod
@@ -266,7 +327,7 @@ class App:
         return DeepSeekProvider(config.deepseek)
 
     def _create_tool_registry(self, config: Config) -> ToolRegistry:
-        """创建工具注册表，对文件操作工具添加撤销追踪。
+        """创建工具注册表，对文件操作工具添加撤销追踪与 Git 自动提交。
 
         Args:
             config: 配置对象。
@@ -283,6 +344,7 @@ class App:
 
         # 包装需要撤销追踪的工具
         workspace_root = config.security.workspace_root
+        auto_commit_enabled = config.git.auto_commit
         for tool_name in ("write_file", "edit_file"):
             original_tool = registry.get(tool_name)
             if original_tool is not None:
@@ -290,10 +352,55 @@ class App:
                     original_tool,
                     self.undo_tracker,
                     workspace_root,
+                    git_manager=self.git_manager,
+                    auto_commit_enabled=auto_commit_enabled,
                 )
                 registry.register(wrapped_tool)
 
         return registry
+
+    def _create_hook_registry(self, config: Config) -> HookRegistry:
+        """创建 HookRegistry，根据 config.hooks 注册内置钩子。
+
+        - auto_lint 为 True：注册 LintHook
+        - auto_git_commit 为 True 且 git.auto_commit 为 True：注册 GitCommitHook
+
+        Args:
+            config: 配置对象。
+
+        Returns:
+            配置好的 HookRegistry 实例。
+        """
+        registry = HookRegistry()
+        if config.hooks.auto_lint:
+            registry.register(LintHook())
+        if config.hooks.auto_git_commit and config.git.auto_commit:
+            registry.register(GitCommitHook(self.git_manager))
+        return registry
+
+    def _create_repo_mapper(self, config: Config) -> RepoMapper | None:
+        """创建 RepoMapper（可选功能）。
+
+        tree-sitter 不可用或 repomap.enabled 为 False 时返回 None。
+
+        Args:
+            config: 配置对象。
+
+        Returns:
+            RepoMapper 实例；不可用时返回 None。
+        """
+        if not config.repomap.enabled:
+            return None
+        try:
+            mapper = RepoMapper(
+                workspace_root=Path(config.security.workspace_root),
+                max_tokens=config.repomap.max_tokens,
+            )
+            if not mapper.is_available():
+                return None
+            return mapper
+        except Exception:
+            return None
 
     def _recreate_provider_and_loop(self) -> None:
         """重新创建 provider 和 agent_loop（/model 和 /provider 命令使用）。
@@ -315,6 +422,10 @@ class App:
             approval=self.approval,
             ui_callback=self.display,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
+            session_manager=self.session_manager,
+            hook_registry=self.hook_registry,
+            max_lint_retries=self.config.hooks.max_lint_retries,
+            repo_mapper=self.repo_mapper,
         )
 
     # ------------------------------------------------------------------
@@ -476,12 +587,30 @@ class App:
             return self._handle_approve_command()
 
         if cmd == "/undo":
+            # 优先尝试 Git 撤销最近一次 codepilot 提交
+            if self.git_manager.is_git_repo():
+                git_success, git_message = self.git_manager.undo_last_commit()
+                if git_success:
+                    display.console.print(
+                        f"[green]已撤销 Git 提交: {git_message}[/green]"
+                    )
+                    return False
+                # Git 撤销失败（非 codepilot 提交或无提交），回退到内存撤销
+            # 回退到内存 UndoTracker.undo()
             success, message = self.undo_tracker.undo()
             if success:
                 display.console.print(f"[green]{message}[/green]")
             else:
                 display.console.print(f"[yellow]{message}[/yellow]")
             return False
+
+        if cmd == "/sessions":
+            sessions = self.session_storage.list_sessions(limit=10)
+            display.show_sessions(cast(list[dict[str, Any]], sessions))
+            return False
+
+        if cmd == "/export":
+            return self._handle_export_command(arg)
 
         # 未知命令
         await display.on_error(f"未知命令: {cmd}（输入 /help 查看可用命令）")
@@ -546,6 +675,80 @@ class App:
                 "[bold red]YOLO 模式已开启，所有操作自动批准[/bold red]"
             )
         return False
+
+    def _handle_export_command(self, arg: str) -> bool:
+        """处理 /export 命令，导出当前会话到文件。
+
+        Args:
+            arg: 导出格式（markdown 或 json），默认 markdown。
+        """
+        display = self.display
+        fmt = arg.strip().lower() if arg.strip() else "markdown"
+        if fmt not in ("markdown", "json"):
+            display.console.print(
+                f"[bold red]不支持的格式: {fmt}（可选: markdown / json）[/bold red]"
+            )
+            return False
+
+        try:
+            record = self.session_manager.get_record()
+        except Exception as e:
+            display.console.print(f"[bold red]获取会话记录失败: {e}[/bold red]")
+            return False
+
+        ext = "md" if fmt == "markdown" else "json"
+        session_id = record.get("session_id", "unknown")
+        file_name = f"codepilot-session-{session_id}.{ext}"
+        file_path = Path.cwd() / file_name
+
+        try:
+            if fmt == "markdown":
+                content = self.session_exporter.to_markdown(record)
+            else:
+                content = self.session_exporter.to_json(record)
+            file_path.write_text(content, encoding="utf-8")
+            display.console.print(f"[green]已导出会话到: {file_path}[/green]")
+        except OSError as e:
+            display.console.print(f"[bold red]导出失败: {e}[/bold red]")
+        return False
+
+    async def resume_from_history(self, session_id: str | None = None) -> bool:
+        """加载历史会话消息注入 context_manager，实现断点续跑。
+
+        Args:
+            session_id: 指定会话 ID。为 None 时加载最近一个会话。
+
+        Returns:
+            True 表示成功加载历史，False 表示无可用历史。
+        """
+        if session_id is None:
+            latest = self.session_storage.get_latest()
+            if latest is None:
+                self.display.console.print("[yellow]没有可恢复的历史会话[/yellow]")
+                return False
+            session_id = latest["session_id"]
+        else:
+            try:
+                latest = self.session_storage.load(session_id)
+            except Exception as e:
+                self.display.console.print(f"[bold red]加载会话失败: {e}[/bold red]")
+                return False
+
+        messages = latest.get("messages", [])
+        if not messages:
+            self.display.console.print(f"[yellow]会话 {session_id} 无历史消息[/yellow]")
+            return False
+
+        # 注入历史消息到 context_manager
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            await self.context_manager.add_message(role, content)
+
+        self.display.console.print(
+            f"[green]已恢复会话 {session_id}（{len(messages)} 条消息）[/green]"
+        )
+        return True
 
 
 # ============================================================================

@@ -14,7 +14,7 @@ import argparse
 import os
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
 import yaml
@@ -151,6 +151,37 @@ class UIConfig(BaseModel):
     max_diff_lines: int = 50
 
 
+class GitConfig(BaseModel):
+    """Git 集成配置。"""
+
+    auto_commit: bool = True
+    commit_message_style: Literal["rules", "llm"] = "rules"
+
+
+class HooksConfig(BaseModel):
+    """Hooks 系统配置。
+
+    控制内置 Hook 的启用与重试上限。
+    """
+
+    auto_lint: bool = True
+    auto_git_commit: bool = True
+    max_lint_retries: int = 3
+
+
+class RepoMapConfig(BaseModel):
+    """Repo Map 配置（可选功能）。
+
+    控制仓库结构摘要的生成。需安装 repomap 可选依赖
+    （tree-sitter-language-pack、networkx）才能实际生效；
+    未安装时 RepoMapper.is_available() 返回 False，相关逻辑静默跳过。
+    """
+
+    enabled: bool = True
+    max_tokens: int = 1024
+    languages: list[str] = Field(default_factory=lambda: ["python"])
+
+
 class Config(BaseSettings):
     """顶层配置结构。
 
@@ -176,6 +207,9 @@ class Config(BaseSettings):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    git: GitConfig = Field(default_factory=GitConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
+    repomap: RepoMapConfig = Field(default_factory=RepoMapConfig)
 
     @field_validator("provider")
     @classmethod
@@ -317,7 +351,16 @@ def _merge_yaml_into_config(config: Config, yaml_data: dict[str, Any]) -> Config
         updates["provider"] = yaml_data["provider"]
 
     # 嵌套 section
-    section_names = ["deepseek", "anthropic", "security", "context", "ui"]
+    section_names = [
+        "deepseek",
+        "anthropic",
+        "security",
+        "context",
+        "ui",
+        "git",
+        "hooks",
+        "repomap",
+    ]
     for section_name in section_names:
         if section_name not in yaml_data:
             continue
@@ -421,6 +464,11 @@ def _apply_cli_args(config: Config, args: argparse.Namespace) -> Config:
         # YOLO 模式：清空需审批列表
         new_security = config.security.model_copy(update={"require_approval_for": []})
         updates["security"] = new_security
+
+    no_auto_commit = getattr(args, "no_auto_commit", False)
+    if no_auto_commit:
+        new_git = config.git.model_copy(update={"auto_commit": False})
+        updates["git"] = new_git
 
     return config.model_copy(update=updates)
 

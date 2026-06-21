@@ -8,6 +8,7 @@ UndoTracker 撤销逻辑、TrackedToolWrapper 工具包装器。
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -115,6 +116,23 @@ class TestApp:
         assert app.tool_registry is not None
         assert app.display is not None
         assert app.agent_loop is not None
+
+    def test_app_repo_mapper_initialized(self, tmp_path: Path) -> None:
+        """App 初始化 repo_mapper 属性并注入 AgentLoop。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # repo_mapper 属性存在（tree-sitter 可用时为 RepoMapper，否则 None）
+        assert hasattr(app, "repo_mapper")
+        # AgentLoop 持有相同的 repo_mapper 引用
+        assert app.agent_loop.repo_mapper is app.repo_mapper
+
+    def test_app_repo_mapper_disabled_returns_none(self, tmp_path: Path) -> None:
+        """repomap.enabled 为 False 时 repo_mapper 为 None。"""
+        config = _make_config(tmp_path)
+        config.repomap.enabled = False
+        app = App(config)
+        assert app.repo_mapper is None
+        assert app.agent_loop.repo_mapper is None
 
     def test_create_app_factory(self, tmp_path: Path) -> None:
         """create_app 工厂函数返回 App 实例。"""
@@ -258,6 +276,78 @@ class TestApp:
         """/undo 命令在空栈时返回 False。"""
         config = _make_config(tmp_path)
         app = App(config)
+        result = await app._handle_slash_command("/undo")
+        assert result is False
+
+    async def test_slash_undo_git_codepilot_commit(self, tmp_path: Path) -> None:
+        """/undo 在 git 仓库中优先撤销 codepilot 提交。"""
+        # 初始化 git 仓库
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "test"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        # 创建文件并通过 GitManager 自动提交
+        file_path = tmp_path / "undo_target.py"
+        file_path.write_text("x = 1\n", encoding="utf-8")
+        app = App(_make_config(tmp_path))
+        app.git_manager.auto_commit("add undo_target.py", [file_path])
+
+        # /undo 应撤销 git 提交
+        result = await app._handle_slash_command("/undo")
+        assert result is False
+        # 验证 git log 中已无 codepilot 提交
+        log_result = subprocess.run(
+            ["git", "log", "--oneline"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert "[codepilot]" not in log_result.stdout
+
+    async def test_slash_undo_git_fallback_to_memory(self, tmp_path: Path) -> None:
+        """/undo 在 git 仓库中非 codepilot 提交时回退到内存撤销。"""
+        # 初始化 git 仓库
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "test"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        # 手动提交（非 codepilot）
+        file_path = tmp_path / "manual.py"
+        file_path.write_text("manual = True\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "manual.py"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "manual commit"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+
+        config = _make_config(tmp_path)
+        app = App(config)
+        # /undo 应回退到内存撤销（git 撤销失败因非 codepilot 提交）
         result = await app._handle_slash_command("/undo")
         assert result is False
 
@@ -444,3 +534,123 @@ class TestTrackedToolWrapper:
         assert len(tracker._stack) == 1
         abs_path, old_content = tracker._stack[0]
         assert old_content == "abs content"
+
+
+# ============================================================================
+# TestSessionIntegration
+# ============================================================================
+
+
+class TestSessionIntegration:
+    """Session 与 App 集成测试（/sessions、/export、resume_from_history）。"""
+
+    async def test_slash_sessions_empty(self, tmp_path: Path) -> None:
+        """/sessions 命令在无历史会话时返回 False。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/sessions")
+        assert result is False
+
+    async def test_slash_sessions_with_data(self, tmp_path: Path) -> None:
+        """/sessions 命令显示最近会话列表。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 通过 session_manager 添加消息并保存
+        app.session_manager.add_message("user", "test message")
+        app.session_manager.save()
+        result = await app._handle_slash_command("/sessions")
+        assert result is False
+
+    async def test_slash_export_markdown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/export markdown 导出会话到 .md 文件。"""
+        monkeypatch.chdir(tmp_path)
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.session_manager.add_message("user", "export test")
+        result = await app._handle_slash_command("/export markdown")
+        assert result is False
+        # 验证文件存在
+        exported_files = list(tmp_path.glob("codepilot-session-*.md"))
+        assert len(exported_files) == 1
+
+    async def test_slash_export_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/export json 导出会话到 .json 文件。"""
+        monkeypatch.chdir(tmp_path)
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.session_manager.add_message("user", "json export test")
+        result = await app._handle_slash_command("/export json")
+        assert result is False
+        exported_files = list(tmp_path.glob("codepilot-session-*.json"))
+        assert len(exported_files) == 1
+
+    async def test_slash_export_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/export 无参数默认导出 markdown。"""
+        monkeypatch.chdir(tmp_path)
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/export")
+        assert result is False
+        exported_files = list(tmp_path.glob("codepilot-session-*.md"))
+        assert len(exported_files) == 1
+
+    async def test_slash_export_invalid_format(self, tmp_path: Path) -> None:
+        """/export 无效格式返回 False 且不导出。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app._handle_slash_command("/export xml")
+        assert result is False
+
+    async def test_resume_from_history_no_sessions(self, tmp_path: Path) -> None:
+        """无历史会话时 resume_from_history 返回 False。"""
+        # 使用空目录的 storage
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 替换为空 storage（覆盖默认 storage 中的数据）
+        from codepilot.session import SessionStorage
+
+        app.session_storage = SessionStorage(sessions_dir=tmp_path / "empty_sessions")
+        result = await app.resume_from_history()
+        assert result is False
+
+    async def test_resume_from_history_with_session_id(self, tmp_path: Path) -> None:
+        """resume_from_history 加载指定会话历史。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        # 保存一条历史
+        app.session_manager.add_message("user", "历史问题")
+        app.session_manager.add_message("assistant", "历史回答")
+        app.session_manager.save()
+        session_id = app.session_manager.get_record()["session_id"]
+
+        # 清空 context_manager 后恢复
+        await app.context_manager.clear()
+        result = await app.resume_from_history(session_id)
+        assert result is True
+        # 验证 context_manager 包含历史消息
+        assert len(app.context_manager.messages) == 2
+
+    async def test_resume_from_history_latest(self, tmp_path: Path) -> None:
+        """resume_from_history 无参数加载最近会话。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        app.session_manager.add_message("user", "最近会话消息")
+        app.session_manager.save()
+
+        await app.context_manager.clear()
+        result = await app.resume_from_history()
+        assert result is True
+        assert len(app.context_manager.messages) == 1
+
+    async def test_resume_from_history_not_found(self, tmp_path: Path) -> None:
+        """resume_from_history 加载不存在的会话返回 False。"""
+        config = _make_config(tmp_path)
+        app = App(config)
+        result = await app.resume_from_history("nonexistent-id-9999")
+        assert result is False

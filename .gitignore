@@ -38,3 +38,8 @@ Thumbs.db
 
 # Project
 temp.md
+.codepilot.yml
+.codepilot/
+.codepilot_cache/
+pytest_out.txt
+pytest_cov.txt

@@ -1,14 +1,23 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.0
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        name: ruff check (--fix)
+        entry: ruff check --fix
+        language: system
+        types: [python]
+        files: ^(src|tests)/
       - id: ruff-format
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
-    hooks:
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+        files: ^(src|tests)/
       - id: mypy
-        additional_dependencies: [pydantic>=2.0, pydantic-settings>=2.0]
-        args: [--strict]
+        name: mypy --strict src/
+        entry: mypy
+        language: system
+        types: [python]
+        args: [--strict, src/]
         files: ^src/
+        pass_filenames: false

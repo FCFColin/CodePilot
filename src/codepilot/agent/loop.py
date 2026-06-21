@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, cast, runtime_checkable
+import time
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import structlog
 
@@ -31,7 +32,16 @@ from codepilot.tools.registry import (
     ToolRegistry,
 )
 
+if TYPE_CHECKING:
+    from codepilot.hooks.registry import HookRegistry
+    from codepilot.repomap import RepoMapper
+    from codepilot.session.manager import SessionManager
+
 logger = structlog.get_logger(__name__)
+
+
+# 单轮内 lint 重试上限（避免无限循环）
+MAX_LINT_RETRIES = 3
 
 
 # ============================================================================
@@ -168,6 +178,10 @@ class AgentLoop:
         ui_callback: UICallback | None = None,
         max_tool_calls_per_turn: int = 25,
         system_prompt: str = "",
+        session_manager: SessionManager | None = None,
+        hook_registry: HookRegistry | None = None,
+        max_lint_retries: int = MAX_LINT_RETRIES,
+        repo_mapper: RepoMapper | None = None,
     ) -> None:
         self.provider = provider
         self.context_manager = context_manager
@@ -177,11 +191,21 @@ class AgentLoop:
         self.ui_callback = ui_callback
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.session_manager = session_manager
+        self.hook_registry = hook_registry
+        self.max_lint_retries = max_lint_retries
+        self.repo_mapper = repo_mapper
         self._cancelled = False
+        # 当前轮生效的系统提示（可能含 RepoMap 摘要）
+        self._effective_system_prompt: str = self.system_prompt
         logger.debug(
             "AgentLoop 已初始化",
             max_tool_calls=max_tool_calls_per_turn,
             has_callback=ui_callback is not None,
+            has_session=session_manager is not None,
+            has_hooks=hook_registry is not None,
+            max_lint_retries=max_lint_retries,
+            has_repo_mapper=repo_mapper is not None,
         )
 
     async def run(self, user_input: str) -> str:
@@ -209,12 +233,56 @@ class AgentLoop:
         finally:
             # 无论正常结束、中断还是异常，都通知 UI 回调
             await self._emit_turn_end()
+            # 保存会话记录（静默失败，不影响主流程）
+            self._save_session()
+
+    def _save_session(self) -> None:
+        """保存会话记录到存储（静默失败）。"""
+        if self.session_manager is None:
+            return
+        try:
+            self.session_manager.save()
+        except Exception as e:
+            logger.warning("会话保存失败", error=str(e))
+
+    def _record_session_message(self, role: str, content: str) -> None:
+        """记录消息到 session（静默失败）。"""
+        if self.session_manager is None:
+            return
+        try:
+            self.session_manager.add_message(role, content)
+        except Exception as e:
+            logger.warning("session 记录消息失败", error=str(e))
+
+    def _record_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        result: str,
+        duration_ms: int,
+    ) -> None:
+        """记录工具调用到 session（静默失败）。"""
+        if self.session_manager is None:
+            return
+        try:
+            self.session_manager.record_tool_call(
+                tool_name=name,
+                arguments=arguments,
+                result=result,
+                duration_ms=duration_ms,
+            )
+        except Exception as e:
+            logger.warning("session 记录工具调用失败", error=str(e))
 
     async def _run_loop(self, user_input: str) -> str:
         """实际循环逻辑（由 run 调用，run 负责 finally 中的 on_turn_end）。"""
         # 1. 将用户输入加入 context_manager
         await self.context_manager.add_message("user", user_input)
+        self._record_session_message("user", user_input)
         logger.info("开始处理用户输入", input_length=len(user_input))
+
+        # 1.5 生成 RepoMap 摘要并追加到系统提示（可选）
+        self._effective_system_prompt = self._build_effective_system_prompt(user_input)
 
         # 获取工具定义（provider 原生格式）
         tools = self._get_tools_format()
@@ -243,7 +311,7 @@ class AgentLoop:
                 async for event in self.provider.chat(
                     cast(list[Message], context),
                     tools=tools,
-                    system_prompt=self.system_prompt,
+                    system_prompt=self._effective_system_prompt,
                     stream=True,
                 ):
                     if self._cancelled:
@@ -288,6 +356,7 @@ class AgentLoop:
                 accumulated_text, tool_calls
             )
             await self.context_manager.add_message("assistant", assistant_msg)
+            self._record_session_message("assistant", accumulated_text)
 
             # 保存当前文本作为可能的最终回复
             if accumulated_text:
@@ -315,14 +384,77 @@ class AgentLoop:
                     # i. 显示工具调用信息
                     await self._emit_tool_call(tc.name, tc.arguments)
 
-                    # ii. 执行工具
+                    # ii. 执行工具（计时）
+                    start_time = time.monotonic()
                     result = await self._execute_tool(tc)
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
 
                     # iii. 显示工具结果（success 由结果字符串前缀判断）
                     success = not result.startswith("Error")
                     await self._emit_tool_result(tc.name, result, success)
 
-                    # iv. 将 tool_result 加入 context_manager
+                    # 记录工具调用到 session
+                    self._record_tool_call(tc.name, tc.arguments, result, duration_ms)
+
+                    # iv. 触发 TOOL_CALL_AFTER Hook（如 LintHook）
+                    # 若 Hook 返回 should_retry=True，将 retry_message 作为
+                    # tool_result 追加到消息历史，触发新一轮 LLM 调用
+                    # （最多重试 max_lint_retries 次，避免无限循环）
+                    path = tc.arguments.get("path")
+                    lint_retry_count = 0
+                    if self.hook_registry is not None:
+                        hook_result = self.hook_registry.trigger_tool_after(
+                            tc.name, path, result
+                        )
+                        while (
+                            hook_result is not None
+                            and hook_result["should_retry"]
+                            and lint_retry_count < self.max_lint_retries
+                        ):
+                            lint_retry_count += 1
+                            retry_msg = hook_result.get("retry_message") or ""
+                            logger.info(
+                                "Lint 错误触发重试",
+                                tool_name=tc.name,
+                                path=path,
+                                retry_count=lint_retry_count,
+                                max_retries=self.max_lint_retries,
+                            )
+                            # 构造带 lint 重试计数的提示消息
+                            lint_retry_text = (
+                                f"[Lint 修复尝试 {lint_retry_count}/"
+                                f"{self.max_lint_retries}] {retry_msg}"
+                            )
+                            # 通知 UI 显示 lint 重试提示
+                            await self._emit_tool_result(
+                                tc.name, lint_retry_text, success=False
+                            )
+                            # 将 retry_message 作为 tool_result 追加到消息历史
+                            tool_result_role = self._get_tool_result_role()
+                            retry_tool_result = self.provider.format_tool_result(
+                                tool_result_role,
+                                tc.id,
+                                lint_retry_text,
+                            )
+                            await self.context_manager.add_message(
+                                tool_result_role, retry_tool_result
+                            )
+
+                            # 触发新一轮 LLM 调用，期望模型修复 lint 错误
+                            new_result = await self._call_llm_for_retry(tc)
+                            if new_result is None:
+                                # LLM 未返回工具调用或被中断：跳出重试循环
+                                break
+                            result = new_result
+                            # 显示重试后的工具结果
+                            success = not result.startswith("Error")
+                            await self._emit_tool_result(tc.name, result, success)
+                            # 再次触发 Hook 检查修复后的文件
+                            hook_result = self.hook_registry.trigger_tool_after(
+                                tc.name, path, result
+                            )
+
+                    # v. 将最终 tool_result 加入 context_manager
                     # 使用 provider.format_tool_result 构造 provider 原生格式 dict，
                     # 同样将完整 dict 作为 content 存入 Message
                     tool_result_role = self._get_tool_result_role()
@@ -341,6 +473,29 @@ class AgentLoop:
 
         logger.info("Agent 循环完成", tool_calls=tool_call_count)
         return final_text
+
+    def _build_effective_system_prompt(self, user_input: str) -> str:
+        """构造当前轮生效的系统提示。
+
+        若 repo_mapper 可用，调用 build_for_query 生成仓库结构摘要并
+        追加到系统提示末尾；否则返回原始系统提示。
+
+        Args:
+            user_input: 当前用户输入，用于驱动相关性排序。
+
+        Returns:
+            可能含 RepoMap 摘要的系统提示字符串。
+        """
+        if self.repo_mapper is None:
+            return self.system_prompt
+        try:
+            map_text = self.repo_mapper.build_for_query(user_input)
+        except Exception as e:
+            logger.warning("RepoMap 生成失败", error=str(e))
+            return self.system_prompt
+        if not map_text:
+            return self.system_prompt
+        return f"{self.system_prompt}\n\n## 当前仓库结构摘要\n{map_text}"
 
     def cancel(self) -> None:
         """中断当前 LLM 调用。
@@ -379,6 +534,88 @@ class AgentLoop:
             # 捕获 ToolError/SecurityError 及其他异常，优雅处理
             logger.error("工具执行异常", name=tool_call.name, error=str(e))
             return f"Error executing tool {tool_call.name}: {e}"
+
+    async def _call_llm_for_retry(self, original_tool_call: ToolCall) -> str | None:
+        """在 lint 重试循环中调用 LLM 获取修复后的工具调用并执行。
+
+        获取当前上下文，调用 provider.chat，期望模型返回修复后的工具调用。
+        若模型返回工具调用，则执行并返回结果字符串；若返回纯文本或被中断，返回 None。
+
+        Args:
+            original_tool_call: 原始触发 lint 错误的工具调用（用于日志）。
+
+        Returns:
+            修复后的工具执行结果字符串；LLM 未返回工具调用或被中断时返回 None。
+        """
+        if self._cancelled:
+            return None
+
+        context = await self.context_manager.get_context()
+        tools = self._get_tools_format()
+        retry_tool_calls: list[ToolCall] = []
+        retry_text = ""
+
+        try:
+            async for event in self.provider.chat(
+                cast(list[Message], context),
+                tools=tools,
+                system_prompt=self._effective_system_prompt,
+                stream=True,
+            ):
+                if self._cancelled:
+                    return None
+                if isinstance(event, TextDelta):
+                    retry_text += event.text
+                    await self._emit_text_delta(event.text)
+                elif isinstance(event, ThinkingDelta):
+                    await self._emit_thinking_delta(event.text)
+                elif isinstance(event, ToolCall):
+                    retry_tool_calls.append(event)
+                elif isinstance(event, Usage):
+                    await self.context_manager.update_usage(
+                        event.input_tokens, event.output_tokens
+                    )
+                    await self._emit_usage(event.input_tokens, event.output_tokens)
+                elif isinstance(event, Done):
+                    break
+        except ProviderError as e:
+            logger.warning(
+                "Lint 重试时 LLM 调用失败",
+                error=str(e),
+                original_tool=original_tool_call.name,
+            )
+            await self._emit_error(f"[LLM 调用失败: {e}]")
+            return None
+
+        # 将 assistant 消息加入 context_manager
+        assistant_msg = self.provider.format_assistant_message(
+            retry_text, retry_tool_calls
+        )
+        await self.context_manager.add_message("assistant", assistant_msg)
+        self._record_session_message("assistant", retry_text)
+
+        if not retry_tool_calls:
+            # LLM 未返回工具调用：返回 None，由调用方跳出重试循环
+            return None
+
+        # 执行第一个工具调用（修复后的 write_file/edit_file）
+        retry_tc = retry_tool_calls[0]
+        await self._emit_tool_call(retry_tc.name, retry_tc.arguments)
+        start_time = time.monotonic()
+        retry_result = await self._execute_tool(retry_tc)
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        self._record_tool_call(
+            retry_tc.name, retry_tc.arguments, retry_result, duration_ms
+        )
+
+        # 将修复后的 tool_result 加入 context_manager
+        tool_result_role = self._get_tool_result_role()
+        retry_tool_result_msg = self.provider.format_tool_result(
+            tool_result_role, retry_tc.id, retry_result
+        )
+        await self.context_manager.add_message(tool_result_role, retry_tool_result_msg)
+
+        return retry_result
 
     def _get_tools_format(self) -> list[dict[str, Any]]:
         """根据 provider 类型返回对应格式的工具定义。

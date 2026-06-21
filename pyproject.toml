@@ -32,6 +32,10 @@ dev = [
     "pre-commit>=3.6",
     "build>=1.0",
 ]
+repomap = [
+    "tree-sitter-language-pack>=0.2",
+    "networkx>=3.0",
+]
 
 [project.scripts]
 codepilot = "codepilot.cli:main"
@@ -42,6 +46,10 @@ packages = ["src/codepilot"]
 [tool.mypy]
 strict = true
 packages = ["src/codepilot"]
+
+[[tool.mypy.overrides]]
+module = ["networkx", "tree_sitter_language_pack"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py311"

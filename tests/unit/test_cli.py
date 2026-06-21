@@ -122,6 +122,36 @@ class TestParseArgs:
         assert args.api_key == "sk-key"
         assert args.verbose is True
 
+    def test_continue_flag(self) -> None:
+        """-c 标志解析为 continue_last=True。"""
+        args = parse_args(["-c"])
+        assert args.continue_last is True
+
+    def test_continue_long_flag(self) -> None:
+        """--continue 标志解析为 continue_last=True。"""
+        args = parse_args(["--continue"])
+        assert args.continue_last is True
+
+    def test_continue_default_false(self) -> None:
+        """未指定 -c 时 continue_last 默认为 False。"""
+        args = parse_args([])
+        assert args.continue_last is False
+
+    def test_resume_flag(self) -> None:
+        """-r SESSION_ID 解析为 resume_session。"""
+        args = parse_args(["-r", "abc12345-1700000000"])
+        assert args.resume_session == "abc12345-1700000000"
+
+    def test_resume_long_flag(self) -> None:
+        """--resume SESSION_ID 解析为 resume_session。"""
+        args = parse_args(["--resume", "session-xyz"])
+        assert args.resume_session == "session-xyz"
+
+    def test_resume_default_none(self) -> None:
+        """未指定 -r 时 resume_session 默认为 None。"""
+        args = parse_args([])
+        assert args.resume_session is None
+
 
 # ============================================================================
 # TestMain
