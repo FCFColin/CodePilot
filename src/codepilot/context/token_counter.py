@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
@@ -198,28 +199,93 @@ class TokenCounter:
     def _count_block(self, block: Any) -> int:
         """统计单个 content block 的 token 数。
 
-        支持 Anthropic content blocks（dict 含 text 字段）和字符串。
+        支持 Anthropic content blocks：
+        - type="text"：计算 text 字段
+        - type="tool_use"：计算 name + json.dumps(input)
+        - type="tool_result"：content 可能是 str 或 list，递归处理
+        - type="thinking"：计算 thinking 字段
+        以及字符串和通用 dict（含 text/content 字段）。
         """
         if block is None:
             return 0
         if isinstance(block, str):
             return self.count_text(block)
         if isinstance(block, dict):
-            # 优先取 text 字段；其次取 content 字段
+            block_type = block.get("type", "")
+            # Anthropic 标准 content block 类型
+            if block_type == "text":
+                return self.count_text(block.get("text", ""))
+            if block_type == "tool_use":
+                total = self.count_text(block.get("name", ""))
+                total += self.count_text(json.dumps(block.get("input", {})))
+                return total
+            if block_type == "tool_result":
+                rc = block.get("content", "")
+                if isinstance(rc, str):
+                    return self.count_text(rc)
+                if isinstance(rc, list):
+                    total = 0
+                    for item in rc:
+                        total += self._count_block(item)
+                    return total
+                return 0
+            if block_type == "thinking":
+                return self.count_text(block.get("thinking", ""))
+            # 通用 dict：优先取 text 字段；其次取 content 字段
             text = block.get("text") or block.get("content")
             if isinstance(text, str):
                 return self.count_text(text)
-            # 嵌套 list（如 tool_result 的 content）
             if isinstance(text, list):
                 total = 0
                 for sub in text:
                     total += self._count_block(sub)
                 return total
             # 其他类型：取 type 字段做最小标记
-            block_type = block.get("type", "")
             return self.count_text(str(block_type)) if block_type else 0
         # 其他类型转字符串
         return self.count_text(str(block))
 
 
-__all__ = ["TokenCounter"]
+# 默认全局计数器实例，供模块级函数使用
+_default_counter = TokenCounter()
+
+
+def count_string_tokens(text: str) -> int:
+    """统计文本 token 数（使用默认全局计数器）。"""
+    return _default_counter.count_text(text)
+
+
+def count_message_tokens(message: dict) -> int:
+    """精确计算单条消息的 token 数，处理所有 content block 类型。"""
+    total = 4  # 每条消息固定开销
+    content = message.get("content", "")
+    if isinstance(content, str):
+        total += count_string_tokens(content)
+    elif isinstance(content, list):
+        for block in content:
+            block_type = block.get("type", "")
+            if block_type == "text":
+                total += count_string_tokens(block.get("text", ""))
+            elif block_type == "tool_use":
+                total += count_string_tokens(block.get("name", ""))
+                total += count_string_tokens(json.dumps(block.get("input", {})))
+            elif block_type == "tool_result":
+                rc = block.get("content", "")
+                if isinstance(rc, str):
+                    total += count_string_tokens(rc)
+                elif isinstance(rc, list):
+                    for item in rc:
+                        total += count_string_tokens(item.get("text", ""))
+            elif block_type == "thinking":
+                total += count_string_tokens(block.get("thinking", ""))
+    # role token
+    total += 1
+    return total
+
+
+def count_messages_tokens(messages: list[dict]) -> int:
+    """精确计算消息列表的总 token 数，使用 count_message_tokens。"""
+    return sum(count_message_tokens(msg) for msg in messages)
+
+
+__all__ = ["TokenCounter", "count_string_tokens", "count_message_tokens", "count_messages_tokens"]

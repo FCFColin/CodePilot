@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -42,6 +43,18 @@ from codepilot.providers.base import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _repair_json(s: str) -> str:
+    """尝试修复常见的 JSON 格式错误。"""
+    # 补全未闭合的括号
+    open_braces = s.count('{') - s.count('}')
+    s += '}' * max(0, open_braces)
+    open_brackets = s.count('[') - s.count(']')
+    s += ']' * max(0, open_brackets)
+    # 删除尾随逗号（在补全括号之后，确保能匹配到逗号+闭合括号）
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+    return s
 
 
 class OpenAICompatProvider(BaseProvider):
@@ -220,19 +233,40 @@ class OpenAICompatProvider(BaseProvider):
                         for idx in sorted(pending_tool_calls.keys()):
                             tc_data = pending_tool_calls[idx]
                             # arguments 是 JSON 字符串，需 parse 为 dict
-                            try:
-                                arguments = (
-                                    json.loads(tc_data["arguments"])
-                                    if tc_data["arguments"]
-                                    else {}
-                                )
-                            except json.JSONDecodeError:
+                            arguments_str = tc_data["arguments"]
+                            if arguments_str:
+                                try:
+                                    arguments = json.loads(arguments_str)
+                                except json.JSONDecodeError:
+                                    try:
+                                        arguments = json.loads(
+                                            _repair_json(arguments_str)
+                                        )
+                                        logger.warning(
+                                            "工具调用参数 JSON 修复成功",
+                                            raw=arguments_str[:100],
+                                        )
+                                    except json.JSONDecodeError:
+                                        logger.error(
+                                            "工具调用参数 JSON 无法修复",
+                                            raw=arguments_str[:200],
+                                        )
+                                        arguments = {
+                                            "_error": "invalid JSON",
+                                            "_raw": arguments_str[:500],
+                                        }
+                            else:
                                 arguments = {}
                             yield ToolCall(
                                 id=tc_data["id"],
                                 name=tc_data["name"],
                                 arguments=arguments,
                             )
+                    elif choice.finish_reason == "length":
+                        yield TextDelta(
+                            text="\n[Response truncated due to max_tokens limit. "
+                            "Consider using /compact or increasing max_tokens.]"
+                        )
                     yield Done(stop_reason=choice.finish_reason)
         except openai.APIError as e:
             logger.error("OpenAI 兼容流式解析失败", error=str(e))
@@ -262,13 +296,27 @@ class OpenAICompatProvider(BaseProvider):
             # 工具调用
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    try:
-                        arguments = (
-                            json.loads(tc.function.arguments)
-                            if tc.function.arguments
-                            else {}
-                        )
-                    except json.JSONDecodeError:
+                    arguments_str = tc.function.arguments
+                    if arguments_str:
+                        try:
+                            arguments = json.loads(arguments_str)
+                        except json.JSONDecodeError:
+                            try:
+                                arguments = json.loads(_repair_json(arguments_str))
+                                logger.warning(
+                                    "工具调用参数 JSON 修复成功",
+                                    raw=arguments_str[:100],
+                                )
+                            except json.JSONDecodeError:
+                                logger.error(
+                                    "工具调用参数 JSON 无法修复",
+                                    raw=arguments_str[:200],
+                                )
+                                arguments = {
+                                    "_error": "invalid JSON",
+                                    "_raw": arguments_str[:500],
+                                }
+                    else:
                         arguments = {}
                     yield ToolCall(
                         id=tc.id,
@@ -276,7 +324,13 @@ class OpenAICompatProvider(BaseProvider):
                         arguments=arguments,
                     )
 
-            yield Done(stop_reason=choice.finish_reason or "stop")
+            finish_reason = choice.finish_reason or "stop"
+            if finish_reason == "length":
+                yield TextDelta(
+                    text="\n[Response truncated due to max_tokens limit. "
+                    "Consider using /compact or increasing max_tokens.]"
+                )
+            yield Done(stop_reason=finish_reason)
 
     def _convert_messages(
         self, messages: Sequence[Message | dict[str, Any]]

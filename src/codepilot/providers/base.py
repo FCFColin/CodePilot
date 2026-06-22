@@ -129,12 +129,13 @@ class OpenAIAssistantMessage(TypedDict, total=False):
 # ============================================================================
 
 
-class AnthropicToolResultBlock(TypedDict):
+class AnthropicToolResultBlock(TypedDict, total=False):
     """Anthropic tool_result content block。"""
 
     type: str  # "tool_result"
     tool_use_id: str
     content: str
+    is_error: bool
 
 
 class AnthropicToolResultMessage(TypedDict):

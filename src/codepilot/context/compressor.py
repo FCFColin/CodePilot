@@ -107,11 +107,12 @@ class ContextCompressor:
             max_tokens: 上下文上限（用于 stats 计算）。
 
         Returns:
-            (summary, stats) 元组。stats 含：
+            (summary, stats, summary_message) 元组。stats 含：
             - before_tokens: 压缩前总 token
             - after_tokens: 压缩后 token（summary + 保留区）
             - messages_compressed: 被压缩的消息数
             - strategy: 实际使用的策略名
+            summary_message 为带 _compressed 标记的摘要消息 dict，无摘要时为 None。
         """
         # max_tokens 参数保留用于未来扩展（如按目标 token 数截断摘要）
         _ = max_tokens
@@ -128,7 +129,7 @@ class ContextCompressor:
                 after_tokens=after_tokens,
                 messages_compressed=0,
                 strategy=self.strategy,
-            )
+            ), None
 
         # 先把完整历史落盘（避免压缩后丢失）
         if self.save_full_history:
@@ -152,6 +153,15 @@ class ContextCompressor:
         preserved_tokens = self.token_counter.count_messages(preserved)
         after_tokens = summary_tokens + preserved_tokens
 
+        # 构造压缩摘要消息（带 _compressed 标记，防止被再次压缩）
+        summary_message: dict[str, Any] | None = None
+        if summary:
+            summary_message = {
+                "role": "assistant",
+                "content": f"[Earlier conversation summary]\n{summary}",
+                "_compressed": True,
+            }
+
         stats = CompressionStats(
             before_tokens=before_tokens,
             after_tokens=after_tokens,
@@ -165,7 +175,7 @@ class ContextCompressor:
             after_tokens=after_tokens,
             messages_compressed=len(compressible),
         )
-        return summary, stats
+        return summary, stats, summary_message
 
     # ------------------------------------------------------------------
     # 策略实现
@@ -236,11 +246,15 @@ class ContextCompressor:
         """hybrid 策略：工具输出截断 + 对话部分 summary/truncate。
 
         优先压缩顺序：文件内容 > 命令输出 > 对话历史。
+        先截断超大工具结果，再对剩余对话做 summary/truncate。
         """
-        # 第一遍：对工具输出/大段命令输出做截断，得到精简后的消息列表
+        # 第零步：截断超大工具结果（>2000 tokens 的单条结果）
+        truncated_list = self._truncate_large_tool_results(compressible)
+
+        # 第一步：对工具输出/大段命令输出做截断，得到精简后的消息列表
         truncated_messages: list[Message] = []
         truncated_summary_parts: list[str] = []
-        for msg in compressible:
+        for msg in truncated_list:
             content = self._get_content(msg)
             if self._is_tool_output(content):
                 # 工具输出：截断为简短标记
@@ -279,11 +293,14 @@ class ContextCompressor:
     ) -> tuple[list[Message], list[Message]]:
         """将消息列表分为（可压缩区, 保留区）。
 
-        保留最后 preserve_recent_turns 轮对话（user+assistant 对）。
-        一轮对话 = 一对 user + assistant 消息。
+        保留最近的消息至少占总 token 的 10%（按 token 数计算），
+        同时保证 preserve_recent_turns 指定的最小轮数。
         """
         if preserve_recent_turns <= 0 or not messages:
             return list(messages), []
+
+        total_tokens = self.token_counter.count_messages(messages)
+        min_preserve_tokens = int(total_tokens * 0.10)
 
         # 从末尾向前找 preserve_recent_turns 个 user 消息的位置
         # user 消息视为一轮的开始
@@ -293,12 +310,19 @@ class ContextCompressor:
             if role == "user":
                 user_indices.append(i)
 
-        # 保留最后 preserve_recent_turns 轮：从倒数第 N 个 user 消息开始
+        # 先按轮数确定初始分割点
         if len(user_indices) < preserve_recent_turns:
             # 不足 N 轮：全部保留，无可压缩区
             return [], list(messages)
 
         split_idx = user_indices[-preserve_recent_turns]
+
+        # 检查保留区 token 是否达到 10%；若不足则向前扩展
+        preserved_tokens = self.token_counter.count_messages(messages[split_idx:])
+        while preserved_tokens < min_preserve_tokens and split_idx > 0:
+            split_idx = max(0, split_idx - 1)
+            preserved_tokens = self.token_counter.count_messages(messages[split_idx:])
+
         compressible = list(messages[:split_idx])
         preserved = list(messages[split_idx:])
         return compressible, preserved
@@ -372,6 +396,31 @@ class ContextCompressor:
                         return True
             return False
         return False
+
+    def _truncate_large_tool_results(
+        self,
+        messages: list[Message],
+        max_single_result_tokens: int = 2000,
+    ) -> list[Message]:
+        """截断超大工具结果，保留前后部分。
+
+        对 role="tool" 且 content 字符长度超过 max_single_result_tokens*4 的消息，
+        保留前 20 行和后 10 行，中间用截断标记替代。
+        """
+        for msg in messages:
+            if self._get_role(msg) == "tool":
+                content = self._get_content(msg)
+                if isinstance(content, str) and len(content) > max_single_result_tokens * 4:
+                    lines = content.split('\n')
+                    if len(lines) > 30:
+                        head = '\n'.join(lines[:20])
+                        tail = '\n'.join(lines[-10:])
+                        truncated_content = f"{head}\n[... {len(lines) - 30} lines truncated ...]\n{tail}"
+                        if isinstance(msg, dict):
+                            msg["content"] = truncated_content
+                        else:
+                            msg.content = truncated_content
+        return messages
 
     async def _append_history(self, messages: list[Message]) -> None:
         """将完整历史追加写入 history_file（JSONL 格式）。

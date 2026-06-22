@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 import structlog
@@ -43,6 +45,34 @@ logger = structlog.get_logger(__name__)
 
 # 单轮内 lint 重试上限（避免无限循环）
 MAX_LINT_RETRIES = 3
+
+
+class LoopDetector:
+    """基于滚动哈希窗口的循环检测器，替代 difflib.SequenceMatcher。"""
+
+    def __init__(self, window_size: int = 5, max_repeats: int = 3):
+        self.window_size = window_size
+        self.max_repeats = max_repeats
+        self._call_hashes: deque[str] = deque(maxlen=window_size * max_repeats)
+
+    def record_call(self, tool_name: str, arguments: dict) -> bool:
+        """记录工具调用，返回 True 表示检测到循环。"""
+        canonical = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+        call_hash = hashlib.md5(canonical.encode()).hexdigest()
+        self._call_hashes.append(call_hash)
+
+        # 检查最近 window_size 个调用中是否有 max_repeats 个相同的
+        recent = list(self._call_hashes)[-self.window_size * self.max_repeats :]
+        hash_counts: dict[str, int] = {}
+        for h in recent:
+            hash_counts[h] = hash_counts.get(h, 0) + 1
+            if hash_counts[h] >= self.max_repeats:
+                return True
+        return False
+
+    def reset(self):
+        """重置检测器状态。"""
+        self._call_hashes.clear()
 
 
 # ============================================================================
@@ -197,7 +227,7 @@ class AgentLoop:
         self.max_lint_retries = max_lint_retries
         self.repo_mapper = repo_mapper
         self._cancelled = False
-        self._recent_tool_calls: list[tuple[str, str]] = []
+        self._loop_detector = LoopDetector()
         self._loop_detected: bool = False
         # 当前轮生效的系统提示（可能含 RepoMap 摘要）
         self._effective_system_prompt: str = self.system_prompt
@@ -427,18 +457,12 @@ class AgentLoop:
                     )
                     self._record_session_message("tool", tool_msg)
 
-                    # 循环检测：记录最近工具调用并检查重复模式
-                    tool_name = tc.name
-                    args_summary = str(tc.arguments)[:200]
-                    self._recent_tool_calls.append((tool_name, args_summary))
-                    if len(self._recent_tool_calls) > 5:
-                        self._recent_tool_calls = self._recent_tool_calls[-5:]
-
-                    if self._detect_loop():
+                    # 循环检测：记录工具调用并检查重复模式
+                    if self._loop_detector.record_call(tc.name, tc.arguments):
                         self._loop_detected = True
                         loop_msg = (
                             f"\n\n⚠️ 检测到重复调用模式："
-                            f"连续 3 次调用 {tool_name} 且参数相似。"
+                            f"连续 3 次调用 {tc.name} 且参数相似。"
                             f"请尝试不同的方法或策略。"
                             f"如果当前方法不奏效，考虑：\n"
                             f"1. 换一种实现方式\n"
@@ -559,32 +583,6 @@ class AgentLoop:
     # ========================================================================
     # 内部辅助方法
     # ========================================================================
-
-    def _detect_loop(self) -> bool:
-        """检测是否出现重复工具调用模式。
-
-        当最近 3 次调用了相同工具且参数相似度 > 80% 时，判定为循环。
-
-        Returns:
-            True 表示检测到循环，False 表示未检测到。
-        """
-        if len(self._recent_tool_calls) < 3:
-            return False
-
-        import difflib
-
-        recent = self._recent_tool_calls[-3:]
-        # 检查最近 3 次是否调用了相同工具
-        tool_names = [call[0] for call in recent]
-        if len(set(tool_names)) != 1:
-            return False
-
-        # 检查参数相似度
-        args = [call[1] for call in recent]
-        similarity_01 = difflib.SequenceMatcher(None, args[0], args[1]).ratio()
-        similarity_12 = difflib.SequenceMatcher(None, args[1], args[2]).ratio()
-
-        return similarity_01 > 0.8 and similarity_12 > 0.8
 
     async def _execute_tool(self, tool_call: ToolCall) -> str:
         """执行单个工具调用，返回结果字符串。
@@ -790,4 +788,4 @@ class AgentLoop:
                 logger.warning("on_turn_end 回调失败", error=str(e))
 
 
-__all__ = ["AgentLoop", "UICallback", "DEFAULT_SYSTEM_PROMPT"]
+__all__ = ["AgentLoop", "LoopDetector", "UICallback", "DEFAULT_SYSTEM_PROMPT"]

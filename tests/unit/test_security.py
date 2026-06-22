@@ -309,6 +309,136 @@ class TestCommandFilter:
 
 
 # ============================================================================
+# TestCommandBypassAttacks
+# ============================================================================
+
+
+class TestCommandBypassAttacks:
+    """命令绕过攻击测试：命令替换/执行器/历史展开/here-string/进程替换/重定向。"""
+
+    # ------------------------------------------------------------------
+    # 命令替换
+    # ------------------------------------------------------------------
+    def test_command_substitution_dollar(self) -> None:
+        """$(...) 命令替换被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check("$(rm -rf /)")
+        assert not is_safe
+        assert "command substitution" in reason
+        assert "$()" in reason
+
+    def test_command_substitution_backtick(self) -> None:
+        """反引号命令替换被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check("`rm -rf /`")
+        assert not is_safe
+        assert "command substitution" in reason
+        assert "backticks" in reason
+
+    # ------------------------------------------------------------------
+    # 命令执行器（eval/exec/bash -c/python -c/node -e）
+    # ------------------------------------------------------------------
+    def test_eval_exec(self) -> None:
+        """eval 命令执行被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check('eval "echo hello"')
+        assert not is_safe
+        assert "command executor" in reason
+
+    def test_bash_c(self) -> None:
+        """bash -c 代码执行被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check('bash -c "echo hello"')
+        assert not is_safe
+        assert "command executor" in reason
+        assert "bash" in reason
+
+    def test_python_c(self) -> None:
+        """python3 -c 代码执行被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check('python3 -c "print(1)"')
+        assert not is_safe
+        assert "command executor" in reason
+        assert "python3" in reason
+
+    def test_node_e(self) -> None:
+        """node -e 代码执行被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check('node -e "console.log(1)"')
+        assert not is_safe
+        assert "command executor" in reason
+        assert "node" in reason
+
+    # ------------------------------------------------------------------
+    # 命令执行器不带 -c/-e 应放行
+    # ------------------------------------------------------------------
+    def test_bash_script_allowed(self) -> None:
+        """bash build.sh 不带 -c 应通过（非白名单模式下）。"""
+        cf = _make_filter(whitelist_mode=False)
+        is_safe, _ = cf.check("bash build.sh")
+        assert is_safe
+
+    def test_python_script_allowed(self) -> None:
+        """python script.py 不带 -c 应通过（非白名单模式下）。"""
+        cf = _make_filter(whitelist_mode=False)
+        is_safe, _ = cf.check("python script.py")
+        assert is_safe
+
+    # ------------------------------------------------------------------
+    # 历史展开
+    # ------------------------------------------------------------------
+    def test_history_expansion_double_bang(self) -> None:
+        """!! 历史展开被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check("!!")
+        assert not is_safe
+        assert "history expansion" in reason
+
+    def test_history_expansion_bang_command(self) -> None:
+        """!rm 历史展开被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check("!rm")
+        assert not is_safe
+        assert "history expansion" in reason
+
+    # ------------------------------------------------------------------
+    # Here-string
+    # ------------------------------------------------------------------
+    def test_here_string(self) -> None:
+        """<<< here-string 被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check('bash <<< "rm -rf /"')
+        assert not is_safe
+        assert "here-string" in reason
+
+    # ------------------------------------------------------------------
+    # 进程替换
+    # ------------------------------------------------------------------
+    def test_process_substitution(self) -> None:
+        """<(...) 进程替换被拦截。"""
+        cf = _make_filter()
+        is_safe, reason = cf.check("cat <(echo hello)")
+        assert not is_safe
+        assert "process substitution" in reason
+
+    # ------------------------------------------------------------------
+    # 重定向到 workspace 外
+    # ------------------------------------------------------------------
+    def test_redirect_outside_workspace(self, tmp_path: Path) -> None:
+        """重定向到 workspace 外的绝对路径被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_command('echo "evil" > /etc/passwd')
+        assert not result.is_safe
+        assert "redirect" in result.reason
+
+    def test_redirect_inside_workspace_allowed(self, tmp_path: Path) -> None:
+        """重定向到 workspace 内相对路径允许。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_command("echo hello > output.txt")
+        assert result.is_safe
+
+
+# ============================================================================
 # TestSandboxValidatePath
 # ============================================================================
 
@@ -532,3 +662,75 @@ class TestApprovalManager:
         manager = ApprovalManager(require_approval_for=[])
         result = await manager.request_approval("file_write", {"path": "test.txt"})
         assert result is True
+
+
+# ============================================================================
+# TestPathTraversalAttacks
+# ============================================================================
+
+
+class TestPathTraversalAttacks:
+    """路径穿越攻击防护测试：URL编码/null byte/长路径/空白/敏感文件。"""
+
+    def test_path_traversal_basic(self, tmp_path: Path) -> None:
+        """../../../etc/passwd 被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("../../../etc/passwd")
+        assert not result.is_safe
+
+    def test_url_encoded_traversal(self, tmp_path: Path) -> None:
+        """%2e%2e%2f%2e%2e%2fetc%2fpasswd 被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("%2e%2e%2f%2e%2e%2fetc%2fpasswd")
+        assert not result.is_safe
+
+    def test_double_url_encoded(self, tmp_path: Path) -> None:
+        """%252e%252e%252f 双重URL编码被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("%252e%252e%252f")
+        assert not result.is_safe
+
+    def test_null_byte_injection(self, tmp_path: Path) -> None:
+        """file.txt\\x00.jpg null byte注入被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("file.txt\x00.jpg")
+        assert not result.is_safe
+        assert "null byte" in result.reason
+
+    def test_overly_long_path(self, tmp_path: Path) -> None:
+        """超长路径（5000字符）被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("a" * 5000)
+        assert not result.is_safe
+        assert "too long" in result.reason
+
+    def test_whitespace_path(self, tmp_path: Path) -> None:
+        """仅空白的路径被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("   ")
+        assert not result.is_safe
+        assert "empty" in result.reason
+
+    def test_sensitive_env_files(self, tmp_path: Path) -> None:
+        """写入 .env 文件被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        for filename in [".env", ".env.local", ".env.production", ".env.development"]:
+            result = sandbox.validate_path(filename, "write")
+            assert not result.is_safe, f"{filename} 应被拦截"
+            assert "sensitive" in result.reason
+
+    def test_git_sensitive_files(self, tmp_path: Path) -> None:
+        """写入 .git/config 等敏感文件被拦截。"""
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        sandbox = _make_sandbox(tmp_path)
+        for name in ["COMMIT_EDITMSG", "config", "index", "HEAD", "hooks"]:
+            result = sandbox.validate_path(str(git_dir / name), "write")
+            assert not result.is_safe, f".git/{name} 应被拦截"
+            assert "sensitive" in result.reason
+
+    def test_absolute_path_outside_workspace(self, tmp_path: Path) -> None:
+        """工作区外的绝对路径 /etc/passwd 被拦截。"""
+        sandbox = _make_sandbox(tmp_path)
+        result = sandbox.validate_path("/etc/passwd")
+        assert not result.is_safe

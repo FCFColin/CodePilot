@@ -516,3 +516,52 @@ class TestSessionExporterEdgeCases:
         assert "token_usage" in parsed
         assert "provider" in parsed
         assert "model" in parsed
+
+
+# ============================================================================
+# SessionStorage 完整性测试（A2.3）
+# ============================================================================
+
+
+class TestSessionStorageIntegrity:
+    """SessionStorage 写入完整性测试：flush+fsync、写入失败降级、文件大小限制。"""
+
+    def test_save_uses_flush_fsync(self, tmp_path: Path) -> None:
+        """save 方法写入后调用 flush + fsync，数据应正确落盘。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        record = _make_record(messages=[{"role": "user", "content": "hello"}])
+        saved_path = storage.save(record)
+        # 文件应存在且内容正确
+        assert saved_path.exists()
+        loaded = storage.load(record["session_id"])
+        assert loaded["session_id"] == record["session_id"]
+        assert loaded["messages"] == record["messages"]
+
+    def test_save_failure_graceful(self, tmp_path: Path) -> None:
+        """写入失败时 save 不抛异常，只记录 error 日志。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        record = _make_record()
+        # 让目录不存在且不可创建，导致写入失败
+        # 通过 mock open 抛出 OSError
+        with (
+            patch("builtins.open", side_effect=OSError("disk full")),
+            structlog.testing.capture_logs() as cap_logs,
+        ):
+            # 不应抛异常
+            result_path = storage.save(record)
+            # 应有 error 级别日志
+            errors = [e for e in cap_logs if e["log_level"] == "error"]
+            assert len(errors) >= 1
+
+    def test_large_file_warning(self, tmp_path: Path) -> None:
+        """JSON 文件超过 50MB 时记录警告日志。"""
+        storage = SessionStorage(sessions_dir=tmp_path / "sessions")
+        # 构造一个超大 messages 列表（模拟 >50MB 的会话）
+        big_content = "x" * 1024  # 1KB per message
+        messages = [{"role": "user", "content": big_content}] * 60000  # ~60MB
+        record = _make_record(messages=messages)
+        with structlog.testing.capture_logs() as cap_logs:
+            storage.save(record)
+        # 检查是否有警告日志（文件超过 50MB）
+        warnings = [e for e in cap_logs if e["log_level"] == "warning" and "50MB" in str(e.get("event", ""))]
+        assert len(warnings) >= 1

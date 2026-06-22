@@ -362,7 +362,7 @@ class TestContextCompressor:
             Message(role="user", content="问题 3"),
             Message(role="assistant", content="回答 3"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=1)
         # 应有 4 条消息被压缩（前 2 轮）
         assert stats["messages_compressed"] == 4
         assert stats["strategy"] == "truncate"
@@ -383,7 +383,7 @@ class TestContextCompressor:
             Message(role="user", content="问题 2"),
             Message(role="assistant", content="回答 2"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=1)
         # 无 provider 时回退到 truncate
         assert "truncated" in summary.lower()
         assert stats["messages_compressed"] > 0
@@ -404,7 +404,7 @@ class TestContextCompressor:
             Message(role="user", content="问题 2"),
             Message(role="assistant", content="回答 2"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=1)
         assert summary == "这是 LLM 生成的摘要"
         assert stats["strategy"] == "summary"
         assert provider.call_count == 1
@@ -426,7 +426,7 @@ class TestContextCompressor:
             Message(role="user", content="问题 3"),
             Message(role="assistant", content="回答 3"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=1)
         assert stats["strategy"] == "hybrid"
         assert "Tool output truncated" in summary
 
@@ -443,7 +443,7 @@ class TestContextCompressor:
             Message(role="user", content="问题 1"),
             Message(role="assistant", content="回答 1"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=2)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=2)
         assert summary == ""
         assert stats["messages_compressed"] == 0
 
@@ -535,7 +535,7 @@ class TestCompressionStrategies:
             Message(role="user", content="最近问题"),
             Message(role="assistant", content="最近回答"),
         ]
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=1)
         # 应丢弃前 2 轮（4 条消息），保留最后 1 轮
         assert stats["messages_compressed"] == 4
         assert stats["strategy"] == "truncate"
@@ -558,17 +558,17 @@ class TestCompressionStrategies:
             messages.append(Message(role="assistant", content=f"回答 {i}"))
 
         # preserve_recent_turns=3 → 保留最后 3 轮（6 条），压缩前 2 轮（4 条）
-        summary, stats = await compressor.compress(messages, preserve_recent_turns=3)
+        summary, stats, summary_msg = await compressor.compress(messages, preserve_recent_turns=3)
         assert stats["messages_compressed"] == 4
         assert summary != ""
 
         # preserve_recent_turns=5 → 全部保留，无可压缩区
-        summary2, stats2 = await compressor.compress(messages, preserve_recent_turns=5)
+        summary2, stats2, _ = await compressor.compress(messages, preserve_recent_turns=5)
         assert stats2["messages_compressed"] == 0
         assert summary2 == ""
 
         # preserve_recent_turns=0 → 全部可压缩
-        summary3, stats3 = await compressor.compress(messages, preserve_recent_turns=0)
+        summary3, stats3, _ = await compressor.compress(messages, preserve_recent_turns=0)
         assert stats3["messages_compressed"] == 10
 
     async def test_force_compress_with_provider(self) -> None:
@@ -614,3 +614,399 @@ class TestCompressionStrategies:
         assert tokens_after < tokens_before
         # stats 也应反映减少
         assert stats["after_tokens"] < stats["before_tokens"]
+
+
+# ============================================================================
+# TestTokenCounterListContent：content 为 list 时的 token 计数测试
+# ============================================================================
+
+
+class TestTokenCounterListContent:
+    """content 为 list（content blocks）时的 token 计数测试。"""
+
+    def test_text_block_counting(self) -> None:
+        """type="text" block：计算 text 字段的 token。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Hello world"},
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+        # 应大于纯 role 开销
+        assert count > 4
+
+    def test_tool_use_block_counting(self) -> None:
+        """type="tool_use" block：计算 name + input 的 token。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "name": "read_file", "input": {"path": "/tmp/a.py"}},
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+        # tool_use 的 token 应大于仅含 text 的同长度消息（因为 name + input 都计算）
+        text_only_msg: dict = {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "read_file"}],
+        }
+        assert count > counter.count_message(text_only_msg)
+
+    def test_tool_result_block_str_content(self) -> None:
+        """type="tool_result" block：content 为 str 时计算 token。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "content": "file content here"},
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+
+    def test_tool_result_block_list_content(self) -> None:
+        """type="tool_result" block：content 为 list 时递归计算 token。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": [
+                        {"type": "text", "text": "line 1 output"},
+                        {"type": "text", "text": "line 2 output"},
+                    ],
+                },
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+        # 应大于只有一行的情况
+        single_msg: dict = {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "content": [{"type": "text", "text": "line 1 output"}]},
+            ],
+        }
+        assert count > counter.count_message(single_msg)
+
+    def test_thinking_block_counting(self) -> None:
+        """type="thinking" block：计算 thinking 字段的 token。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me think about this problem..."},
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+
+    def test_mixed_blocks_counting(self) -> None:
+        """混合多种 content block 类型时正确计数。"""
+        counter = TokenCounter()
+        msg: dict = {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "思考中..."},
+                {"type": "text", "text": "这是回答"},
+                {"type": "tool_use", "name": "read_file", "input": {"path": "a.py"}},
+            ],
+        }
+        count = counter.count_message(msg)
+        assert count > 0
+        # 应大于只含 text block 的消息
+        text_only: dict = {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "这是回答"}],
+        }
+        assert count > counter.count_message(text_only)
+
+    def test_count_message_tokens_function(self) -> None:
+        """模块级 count_message_tokens 函数正确处理各种 content block。"""
+        from codepilot.context.token_counter import count_message_tokens
+
+        msg: dict = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "tool_use", "name": "search", "input": {"q": "test"}},
+            ],
+        }
+        count = count_message_tokens(msg)
+        assert count > 0
+        # str content 的消息也应正常工作
+        str_msg: dict = {"role": "user", "content": "Hello world"}
+        assert count_message_tokens(str_msg) > 0
+
+    def test_count_messages_tokens_function(self) -> None:
+        """模块级 count_messages_tokens 函数正确计算消息列表。"""
+        from codepilot.context.token_counter import count_messages_tokens
+
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": [{"type": "text", "text": "Hi there"}]},
+        ]
+        total = count_messages_tokens(messages)
+        assert total > 0
+        # 应等于各消息之和
+        from codepilot.context.token_counter import count_message_tokens
+        expected = sum(count_message_tokens(m) for m in messages)
+        assert total == expected
+
+
+# ============================================================================
+# TestCompressorFixes：压缩器修复测试
+# ============================================================================
+
+
+class TestCompressorFixes:
+    """压缩器修复测试：压缩标记、工具结果截断、preserve_recent_turns 按 token。"""
+
+    async def test_compressed_summary_marker(self) -> None:
+        """压缩生成的摘要消息带 _compressed: True 标记。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="truncate",
+            save_full_history=False,
+        )
+        messages: list[Message] = [
+            Message(role="user", content="问题 1"),
+            Message(role="assistant", content="回答 1"),
+            Message(role="user", content="问题 2"),
+            Message(role="assistant", content="回答 2"),
+        ]
+        summary, stats, summary_message = await compressor.compress(
+            messages, preserve_recent_turns=1
+        )
+        assert summary_message is not None
+        assert summary_message.get("_compressed") is True
+        assert "[Earlier conversation summary]" in summary_message.get("content", "")
+
+    async def test_no_summary_no_marker(self) -> None:
+        """无压缩摘要时 summary_message 为 None。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="truncate",
+            save_full_history=False,
+        )
+        messages: list[Message] = [
+            Message(role="user", content="问题 1"),
+            Message(role="assistant", content="回答 1"),
+        ]
+        summary, stats, summary_message = await compressor.compress(
+            messages, preserve_recent_turns=5
+        )
+        assert summary == ""
+        assert summary_message is None
+
+    async def test_truncate_large_tool_results(self) -> None:
+        """_truncate_large_tool_results 截断超大工具结果。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="hybrid",
+            save_full_history=False,
+        )
+        # 构造超大工具结果消息（>2000*4=8000 字符，>30 行）
+        large_content = "\n".join(f"line {i}: " + "x" * 200 for i in range(50))
+        messages: list[Message] = [
+            Message(role="user", content="问题 1"),
+            Message(role="assistant", content="回答 1"),
+            Message(role="user", content="问题 2"),
+            Message(role="assistant", content="回答 2"),
+        ]
+        # 直接测试 _truncate_large_tool_results 方法
+        tool_msg: dict = {"role": "tool", "content": large_content}
+        result = compressor._truncate_large_tool_results([tool_msg])
+        assert "lines truncated" in result[0]["content"]
+        # 前后内容应保留
+        assert "line 0:" in result[0]["content"]
+        assert "line 49:" in result[0]["content"]
+
+    async def test_preserve_recent_turns_by_token(self) -> None:
+        """preserve_recent_turns 按保留区至少占 10% token 扩展。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="truncate",
+            save_full_history=False,
+        )
+        # 构造消息：前面消息很长，最后几条很短
+        messages: list[Message] = []
+        # 前面 4 轮，每轮内容很长
+        for i in range(4):
+            messages.append(Message(role="user", content=f"长问题 {i} " * 100))
+            messages.append(Message(role="assistant", content=f"长回答 {i} " * 100))
+        # 最后 2 轮，内容很短
+        messages.append(Message(role="user", content="短问题"))
+        messages.append(Message(role="assistant", content="短回答"))
+        messages.append(Message(role="user", content="短问题2"))
+        messages.append(Message(role="assistant", content="短回答2"))
+
+        total_tokens = counter.count_messages(messages)
+        compressible, preserved = compressor._split_messages(messages, preserve_recent_turns=1)
+        # 保留区 token 应至少占总 token 的 10%
+        preserved_tokens = counter.count_messages(preserved)
+        assert preserved_tokens >= total_tokens * 0.10
+
+
+# ============================================================================
+# TestLayeredCompressor：分层压缩测试
+# ============================================================================
+
+
+class TestLayeredCompressor:
+    """LayeredCompressor 分层压缩测试。"""
+
+    async def test_compress_below_threshold_no_op(self) -> None:
+        """使用率低于 Layer 0 阈值（40%）时不压缩。"""
+        from codepilot.context.layered_compressor import LayeredCompressor
+
+        compressor = LayeredCompressor()
+        messages = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好，有什么可以帮你？"},
+        ]
+        max_tokens = 10000
+        current_tokens = 50  # 0.5% 使用率，远低于 40%
+
+        result, stats = await compressor.compress(
+            messages=messages,
+            system_prompt="系统提示",
+            current_tokens=current_tokens,
+            max_tokens=max_tokens,
+        )
+
+        # 不应触发任何压缩层
+        assert stats.layers_applied == []
+        assert stats.before_tokens == current_tokens
+        assert stats.after_tokens == current_tokens
+        # 消息应原样返回
+        assert result == messages
+
+    async def test_layer0_observation_masking(self) -> None:
+        """Layer 0：对大型工具输出做 observation masking。"""
+        from codepilot.context.layered_compressor import LayeredCompressor
+
+        compressor = LayeredCompressor()
+        # 构造大型工具输出（>MAX_SINGLE_RESULT_CHARS 且行数足够多）
+        large_tool_content = "\n".join(f"line {i}: " + "x" * 200 for i in range(100))
+        messages = [
+            {"role": "user", "content": "请运行命令"},
+            {"role": "assistant", "content": "正在运行"},
+            {"role": "tool", "content": large_tool_content},
+            {"role": "assistant", "content": "命令已完成"},
+        ]
+        max_tokens = 10000
+        # 设置使用率为 50%（>= 40% 触发 Layer 0）
+        current_tokens = int(max_tokens * 0.50)
+
+        result, stats = await compressor.compress(
+            messages=messages,
+            system_prompt="",
+            current_tokens=current_tokens,
+            max_tokens=max_tokens,
+        )
+
+        # 应触发 Layer 0
+        assert "observation_masking" in stats.layers_applied
+        # 工具输出应被折叠（包含 "lines folded" 标记）
+        tool_msgs = [m for m in result if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "lines folded" in tool_msgs[0]["content"]
+        # 非 tool 消息应保持不变
+        non_tool_contents = [m for m in result if m.get("role") != "tool"]
+        assert any("命令已完成" in m.get("content", "") for m in non_tool_contents)
+
+    async def test_layer1_tool_result_truncation(self) -> None:
+        """Layer 1：对超大工具输出进行截断。"""
+        from codepilot.context.layered_compressor import LayeredCompressor
+
+        compressor = LayeredCompressor()
+        # 直接测试 _truncate_tool_results 方法
+        huge_tool_content = "\n".join(f"line {i}: " + "y" * 400 for i in range(60))
+        messages = [
+            {"role": "user", "content": "请运行命令"},
+            {"role": "tool", "content": huge_tool_content},
+            {"role": "assistant", "content": "命令已完成"},
+        ]
+
+        result = compressor._truncate_tool_results(messages)
+
+        # 工具输出应被截断（包含 "lines truncated" 标记）
+        tool_msgs = [m for m in result if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert "lines truncated" in tool_msgs[0]["content"]
+        # 截断后内容应比原始短
+        assert len(tool_msgs[0]["content"]) < len(huge_tool_content)
+        # 非 tool 消息应保持不变
+        non_tool = [m for m in result if m.get("role") != "tool"]
+        assert len(non_tool) == 2
+
+    async def test_layer3_force_truncate(self) -> None:
+        """Layer 3：强制截断丢弃最早消息。"""
+        from codepilot.context.layered_compressor import LayeredCompressor
+
+        compressor = LayeredCompressor()
+        # 构造大量消息
+        messages = []
+        for i in range(50):
+            messages.append({"role": "user", "content": f"用户消息 {i} " * 50})
+            messages.append({"role": "assistant", "content": f"助手回复 {i} " * 50})
+
+        max_tokens = 10000
+        # 设置使用率为 92%（>= 88% 触发 Layer 3）
+        current_tokens = int(max_tokens * 0.92)
+
+        result, stats = await compressor.compress(
+            messages=messages,
+            system_prompt="",
+            current_tokens=current_tokens,
+            max_tokens=max_tokens,
+        )
+
+        # 应触发 force_truncation
+        assert "force_truncation" in stats.layers_applied
+        # 结果消息数应少于原始消息数
+        assert len(result) < len(messages)
+        # 最早的消息应被丢弃
+        assert "用户消息 0" not in str(result)
+
+    async def test_preserve_tail_ratio(self) -> None:
+        """最后 10% 的消息（保留区）应逐字保留。"""
+        from codepilot.context.layered_compressor import LayeredCompressor
+
+        compressor = LayeredCompressor()
+        # 构造消息：前面有大量工具输出，最后几条是重要对话
+        messages = []
+        for i in range(20):
+            messages.append({"role": "user", "content": f"问题 {i}"})
+            messages.append({"role": "tool", "content": "x" * 500})
+            messages.append({"role": "assistant", "content": f"回答 {i}"})
+
+        # 最后几条重要消息
+        messages.append({"role": "user", "content": "最终重要问题"})
+        messages.append({"role": "assistant", "content": "最终重要回答"})
+
+        max_tokens = 10000
+        current_tokens = int(max_tokens * 0.50)
+
+        result, stats = await compressor.compress(
+            messages=messages,
+            system_prompt="",
+            current_tokens=current_tokens,
+            max_tokens=max_tokens,
+        )
+
+        # 保留区的消息应逐字保留
+        result_contents = [m.get("content", "") for m in result]
+        # 最终重要消息应在结果中
+        assert any("最终重要问题" in c for c in result_contents)
+        assert any("最终重要回答" in c for c in result_contents)

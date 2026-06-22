@@ -85,6 +85,9 @@ class SessionStorage:
     def save(self, record: SessionRecord) -> Path:
         """将 record 序列化为 JSON 写入文件，返回文件路径。
 
+        写入后调用 flush + fsync 确保数据落盘。
+        写入失败时记录日志，不抛出异常（避免影响主流程）。
+
         Args:
             record: 会话记录。
 
@@ -92,13 +95,31 @@ class SessionStorage:
             写入的文件路径。
         """
         file_path = self.sessions_dir / f"{record['session_id']}.json"
-        content = json.dumps(record, ensure_ascii=False, indent=2)
-        file_path.write_text(content, encoding="utf-8")
-        logger.debug(
-            "会话已保存",
-            session_id=record["session_id"],
-            path=str(file_path),
-        )
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(record, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            # 检查文件大小：超过 50MB 记录警告
+            file_size = file_path.stat().st_size
+            if file_size > 50 * 1024 * 1024:
+                logger.warning(
+                    "会话文件超过 50MB",
+                    session_id=record["session_id"],
+                    file_size_mb=round(file_size / (1024 * 1024), 2),
+                    path=str(file_path),
+                )
+            logger.debug(
+                "会话已保存",
+                session_id=record["session_id"],
+                path=str(file_path),
+            )
+        except OSError as e:
+            logger.error(
+                "会话保存失败",
+                session_id=record["session_id"],
+                error=str(e),
+            )
         return file_path
 
     def load(self, session_id: str) -> SessionRecord:

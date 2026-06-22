@@ -1460,3 +1460,237 @@ class TestProviderDifferences:
         assert openai_tc.arguments == {"file": "a.py"}
         # name 也应一致
         assert openai_tc.name == anthropic_tc.name == "read"
+
+
+# ============================================================================
+# TestLoopDetector：循环检测器测试
+# ============================================================================
+
+
+class TestLoopDetector:
+    """LoopDetector 循环检测器测试。"""
+
+    def test_no_loop_with_few_calls(self) -> None:
+        """调用次数不足时不检测到循环。"""
+        from codepilot.agent.loop import LoopDetector
+
+        detector = LoopDetector()
+        assert detector.record_call("read_file", {"path": "a.py"}) is False
+        assert detector.record_call("read_file", {"path": "b.py"}) is False
+
+    def test_detect_loop_with_repeated_calls(self) -> None:
+        """连续 3 次相同调用检测到循环。"""
+        from codepilot.agent.loop import LoopDetector
+
+        detector = LoopDetector()
+        args = {"path": "same.py", "content": "hello"}
+        assert detector.record_call("edit_file", args) is False
+        assert detector.record_call("edit_file", args) is False
+        assert detector.record_call("edit_file", args) is True
+
+    def test_no_loop_with_different_args(self) -> None:
+        """相同工具但不同参数不触发循环。"""
+        from codepilot.agent.loop import LoopDetector
+
+        detector = LoopDetector()
+        assert detector.record_call("read_file", {"path": "a.py"}) is False
+        assert detector.record_call("read_file", {"path": "b.py"}) is False
+        assert detector.record_call("read_file", {"path": "c.py"}) is False
+
+    def test_reset_clears_state(self) -> None:
+        """reset 后重新开始检测。"""
+        from codepilot.agent.loop import LoopDetector
+
+        detector = LoopDetector()
+        args = {"path": "same.py"}
+        detector.record_call("read_file", args)
+        detector.record_call("read_file", args)
+        detector.reset()
+        # 重置后不应检测到循环
+        assert detector.record_call("read_file", args) is False
+
+
+# ============================================================================
+# TestJsonRepair：JSON 修复测试
+# ============================================================================
+
+
+class TestJsonRepair:
+    """_repair_json 函数测试。"""
+
+    def test_repair_trailing_comma_in_object(self) -> None:
+        """修复对象中的尾随逗号。"""
+        from codepilot.providers.openai_compat import _repair_json
+
+        result = _repair_json('{"key": "value",}')
+        assert json.loads(result) == {"key": "value"}
+
+    def test_repair_trailing_comma_in_array(self) -> None:
+        """修复数组中的尾随逗号。"""
+        from codepilot.providers.openai_compat import _repair_json
+
+        result = _repair_json('["a", "b",]')
+        assert json.loads(result) == ["a", "b"]
+
+    def test_repair_unclosed_braces(self) -> None:
+        """补全未闭合的大括号。"""
+        from codepilot.providers.openai_compat import _repair_json
+
+        result = _repair_json('{"key": "value"')
+        assert json.loads(result) == {"key": "value"}
+
+    def test_repair_unclosed_brackets(self) -> None:
+        """补全未闭合的方括号。"""
+        from codepilot.providers.openai_compat import _repair_json
+
+        result = _repair_json('["a", "b"')
+        assert json.loads(result) == ["a", "b"]
+
+    def test_repair_multiple_issues(self) -> None:
+        """同时修复尾随逗号和未闭合括号。"""
+        from codepilot.providers.openai_compat import _repair_json
+
+        result = _repair_json('{"key": ["a",], "b": 1,')
+        parsed = json.loads(result)
+        assert parsed == {"key": ["a"], "b": 1}
+
+    def test_anthropic_repair_json_same_logic(self) -> None:
+        """Anthropic 的 _repair_json 与 OpenAI 逻辑一致。"""
+        from codepilot.providers.anthropic import _repair_json as anthropic_repair
+        from codepilot.providers.openai_compat import _repair_json as openai_repair
+
+        test_input = '{"key": "value",'
+        assert anthropic_repair(test_input) == openai_repair(test_input)
+
+
+# ============================================================================
+# TestAnthropicSpecialHandling：Anthropic 特殊处理测试
+# ============================================================================
+
+
+class TestAnthropicSpecialHandling:
+    """Anthropic Provider 特殊处理测试。"""
+
+    def test_tool_result_is_error_on_error_prefix(self) -> None:
+        """工具结果以 Error 开头时设置 is_error=True。"""
+        provider = AnthropicProvider(_anthropic_config())
+        result = provider.format_tool_result(
+            role="user",
+            tool_call_id="toolu_1",
+            content="Error: file not found",
+        )
+        block = result["content"][0]
+        assert block["is_error"] is True
+
+    def test_tool_result_no_is_error_on_success(self) -> None:
+        """工具结果不以 Error 开头时不设置 is_error。"""
+        provider = AnthropicProvider(_anthropic_config())
+        result = provider.format_tool_result(
+            role="user",
+            tool_call_id="toolu_1",
+            content="文件内容读取成功",
+        )
+        block = result["content"][0]
+        assert "is_error" not in block
+
+    def test_thinking_blocks_preserved_in_convert_messages(self) -> None:
+        """assistant 消息中的 thinking blocks 被原样保留。"""
+        provider = AnthropicProvider(_anthropic_config())
+        # 模拟含 thinking block 的 assistant 消息
+        content_with_thinking = [
+            {"type": "thinking", "thinking": "让我分析一下..."},
+            {"type": "text", "text": "这是回复"},
+        ]
+        messages = [
+            Message(role="assistant", content=content_with_thinking),
+        ]
+        result = provider._convert_messages(messages)
+        # thinking block 应被原样保留
+        assert result[0]["role"] == "assistant"
+        assert isinstance(result[0]["content"], list)
+        assert len(result[0]["content"]) == 2
+        assert result[0]["content"][0]["type"] == "thinking"
+        assert result[0]["content"][0]["thinking"] == "让我分析一下..."
+        assert result[0]["content"][1]["type"] == "text"
+
+    def test_thinking_blocks_with_tool_use_preserved(self) -> None:
+        """assistant 消息中 thinking + tool_use blocks 被完整保留。"""
+        provider = AnthropicProvider(_anthropic_config())
+        content_with_thinking = [
+            {"type": "thinking", "thinking": "需要读取文件..."},
+            {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a.py"}},
+        ]
+        messages = [
+            Message(role="assistant", content=content_with_thinking),
+        ]
+        result = provider._convert_messages(messages)
+        assert len(result[0]["content"]) == 2
+        assert result[0]["content"][0]["type"] == "thinking"
+        assert result[0]["content"][1]["type"] == "tool_use"
+
+
+# ============================================================================
+# TestFinishReasonLength：finish_reason="length" 截断提示测试
+# ============================================================================
+
+
+class TestFinishReasonLength:
+    """finish_reason='length' 截断提示测试。"""
+
+    async def test_openai_streaming_length_truncation(self) -> None:
+        """OpenAI 流式响应 finish_reason=length 时添加截断提示。"""
+        chunks = [
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"content": "部分回复"}, "finish_reason": None}
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+            },
+        ]
+        with respx.mock:
+            respx.post(_DEEPSEEK_URL).mock(
+                return_value=_sse_response(_openai_sse(chunks))
+            )
+            provider = OpenAICompatProvider(_provider_config())
+            events = await _collect(provider.chat([Message(role="user", content="hi")]))
+        # 应有 TextDelta(部分回复) + TextDelta(截断提示) + Done
+        text_deltas = [e for e in events if isinstance(e, TextDelta)]
+        assert len(text_deltas) == 2
+        assert text_deltas[0].text == "部分回复"
+        assert "truncated" in text_deltas[1].text
+        done_events = [e for e in events if isinstance(e, Done)]
+        assert len(done_events) == 1
+        assert done_events[0].stop_reason == "length"
+
+    async def test_openai_non_stream_length_truncation(self) -> None:
+        """OpenAI 非流式响应 finish_reason=length 时添加截断提示。"""
+        resp = {
+            "id": "c1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "部分回复"},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }
+        with respx.mock:
+            respx.post(_DEEPSEEK_URL).mock(return_value=_json_response(resp))
+            provider = OpenAICompatProvider(_provider_config())
+            events = await _collect(
+                provider.chat([Message(role="user", content="hi")], stream=False)
+            )
+        text_deltas = [e for e in events if isinstance(e, TextDelta)]
+        assert len(text_deltas) == 2
+        assert text_deltas[0].text == "部分回复"
+        assert "truncated" in text_deltas[1].text
+        done_events = [e for e in events if isinstance(e, Done)]
+        assert done_events[0].stop_reason == "length"

@@ -18,14 +18,20 @@ from typing import Any, cast
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
+import structlog
+
 from codepilot.agent.loop import DEFAULT_SYSTEM_PROMPT, AgentLoop
 from codepilot.config import Config
 from codepilot.context.compressor import CompressionStrategy, ContextCompressor
 from codepilot.context.manager import ContextManager
+from codepilot.context.project_instructions import load_project_instructions
 from codepilot.context.token_counter import TokenCounter
+from codepilot.cost.tracker import CostTracker
 from codepilot.exceptions import CodePilotError
 from codepilot.git import CommitMessageGenerator, GitManager
 from codepilot.hooks import GitCommitHook, HookRegistry, LintHook
+from codepilot.mcp.client import MCPClientManager
+from codepilot.memory.manager import MemoryManager
 from codepilot.providers.anthropic import AnthropicProvider
 from codepilot.providers.base import BaseProvider
 from codepilot.providers.openai_compat import OpenAICompatProvider
@@ -50,6 +56,8 @@ _HISTORY_FILE = os.path.join(os.path.expanduser("~"), ".codepilot_history")
 
 # 默认需审批的操作类型（/approve 关闭 YOLO 时恢复）
 _DEFAULT_APPROVAL_OPS: list[str] = ["file_write", "file_edit", "shell_exec"]
+
+logger = structlog.get_logger(__name__)
 
 
 # ============================================================================
@@ -275,6 +283,69 @@ class TrackedToolWrapper(BaseTool):
         return self._tool.to_anthropic_format()
 
 
+class MCPToolWrapper(BaseTool):
+    """MCP 工具包装器，将 MCP 服务器工具适配为 BaseTool 接口。"""
+
+    def __init__(self, mcp_tool: dict, mcp_manager: MCPClientManager) -> None:
+        self._mcp_tool = mcp_tool
+        self._mcp_manager = mcp_manager
+        self.name: str = mcp_tool["name"]
+        self.description: str = mcp_tool.get("description", "")
+
+    def get_parameters(self) -> dict[str, Any]:
+        """返回 MCP 工具的参数定义。"""
+        return self._mcp_tool.get("input_schema", {
+            "type": "object",
+            "properties": {},
+        })
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        sandbox: SandboxProtocol | None = None,
+        approval: ApprovalProtocol | None = None,
+    ) -> str:
+        """调用 MCP 工具。"""
+        return await self._mcp_manager.call_tool(self.name, arguments)
+
+
+# ============================================================================
+# 应用容器
+# ============================================================================
+
+
+class _UICallbackWithCost:
+    """UI 回调包装器，在 on_usage 时同步记录到 CostTracker。"""
+
+    def __init__(self, delegate: Any, cost_tracker: CostTracker, config: Config) -> None:
+        self._delegate = delegate
+        self._cost_tracker = cost_tracker
+        self._config = config
+
+    async def on_text_delta(self, text: str) -> None:
+        await self._delegate.on_text_delta(text)
+
+    async def on_thinking_delta(self, text: str) -> None:
+        await self._delegate.on_thinking_delta(text)
+
+    async def on_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
+        await self._delegate.on_tool_call(name, arguments)
+
+    async def on_tool_result(self, name: str, result: str, success: bool) -> None:
+        await self._delegate.on_tool_result(name, result, success)
+
+    async def on_usage(self, input_tokens: int, output_tokens: int) -> None:
+        model = self._config.providers[self._config.provider].model
+        self._cost_tracker.record_usage(model, input_tokens, output_tokens)
+        await self._delegate.on_usage(input_tokens, output_tokens)
+
+    async def on_error(self, error: str) -> None:
+        await self._delegate.on_error(error)
+
+    async def on_turn_end(self) -> None:
+        await self._delegate.on_turn_end()
+
+
 # ============================================================================
 # 应用容器
 # ============================================================================
@@ -285,6 +356,7 @@ class App:
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self._debug_mode: bool = False
 
         # 1. 创建 Provider
         self.provider: BaseProvider = self._create_provider(config)
@@ -361,7 +433,26 @@ class App:
         # 11.5 创建 RepoMapper（可选；tree-sitter 不可用时为 None）
         self.repo_mapper = self._create_repo_mapper(config)
 
-        # 12. 创建 AgentLoop
+        # 11.6 创建 MCPClientManager（如果配置了 mcp_servers）
+        self.mcp_manager: MCPClientManager | None = None
+        if config.mcp_servers:
+            self.mcp_manager = MCPClientManager(config.mcp_servers)
+
+        # 11.7 创建 MemoryManager
+        self.memory_manager = MemoryManager(config.security.workspace_root)
+
+        # 12. 创建 AgentLoop加载项目指令文件
+        self._project_instructions = load_project_instructions(
+            str(config.security.workspace_root)
+        )
+
+        # 13. 创建 CostTracker（会话级费用追踪）
+        self._cost_tracker = CostTracker()
+
+        # 14. 构建含项目指令的系统提示
+        self._system_prompt = self._build_system_prompt()
+
+        # 15. 创建 AgentLoop
         self.agent_loop = AgentLoop(
             provider=self.provider,
             context_manager=self.context_manager,
@@ -369,7 +460,7 @@ class App:
             sandbox=self.sandbox,
             approval=self.approval,
             ui_callback=self.display,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            system_prompt=self._system_prompt,
             session_manager=self.session_manager,
             hook_registry=self.hook_registry,
             max_lint_retries=config.hooks.max_lint_retries,
@@ -470,6 +561,24 @@ class App:
         except Exception:
             return None
 
+    def _build_system_prompt(self) -> str:
+        """构建含项目指令和记忆的系统提示。
+
+        将项目指令文件内容和跨会话记忆追加到默认系统提示尾部。
+
+        Returns:
+            完整的系统提示字符串。
+        """
+        prompt = DEFAULT_SYSTEM_PROMPT
+        if self._project_instructions:
+            prompt = f"{prompt}\n\n## Project Instructions\n{self._project_instructions}"
+        # 附加记忆内容
+        if self.memory_manager is not None:
+            memories_text = self.memory_manager.get_all_memories_text()
+            if memories_text:
+                prompt = f"{prompt}\n\n## Memories\n{memories_text}"
+        return prompt
+
     def _recreate_provider_and_loop(self) -> None:
         """重新创建 provider 和 agent_loop（/model 和 /provider 命令使用）。
 
@@ -488,8 +597,8 @@ class App:
             tool_registry=self.tool_registry,
             sandbox=self.sandbox,
             approval=self.approval,
-            ui_callback=self.display,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            ui_callback=_UICallbackWithCost(self.display, self._cost_tracker, self.config),
+            system_prompt=self._system_prompt,
             session_manager=self.session_manager,
             hook_registry=self.hook_registry,
             max_lint_retries=self.config.hooks.max_lint_retries,
@@ -511,6 +620,24 @@ class App:
         """
         # 显示启动 banner
         show_banner(self.config, self.display.console)
+
+        # 连接 MCP 服务器（如果配置了）
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.connect_all()
+                # 将 MCP 工具合并到工具注册表
+                mcp_tools = self.mcp_manager.get_all_tools()
+                for mcp_tool in mcp_tools:
+                    wrapper = MCPToolWrapper(mcp_tool, self.mcp_manager)
+                    self.tool_registry.register(wrapper)
+                if mcp_tools:
+                    self.display.console.print(
+                        f"[green]已连接 MCP 服务器，加载 {len(mcp_tools)} 个工具[/green]"
+                    )
+            except Exception as e:
+                self.display.console.print(
+                    f"[yellow]MCP 连接失败: {e}[/yellow]"
+                )
 
         # 检测 stdin 是否为 TTY
         is_tty = sys.stdin.isatty()
@@ -570,6 +697,13 @@ class App:
             # Agent 循环
             try:
                 self.undo_tracker.mark_turn_start()
+                # 结构化日志：LLM 调用
+                logger.info(
+                    "LLM 调用",
+                    provider=self.config.provider,
+                    model=self.config.providers[self.config.provider].model,
+                    input_length=len(user_input),
+                )
                 await self.agent_loop.run(user_input)
             except KeyboardInterrupt:
                 # Ctrl+C 中断 agent 循环
@@ -636,8 +770,18 @@ class App:
 
         if cmd == "/compact":
             display.console.print("[dim]正在压缩上下文...[/dim]")
+            # 结构化日志：压缩前 token 数
+            pre_stats = self.context_manager.get_stats()
             try:
                 comp_stats = await self.context_manager.force_compress()
+                # 结构化日志：压缩结果
+                logger.info(
+                    "上下文压缩",
+                    trigger="manual",
+                    pre_tokens=pre_stats["total_tokens"],
+                    post_tokens=self.context_manager.total_tokens,
+                    messages_removed=comp_stats.get("messages_removed", 0),
+                )
                 display.on_compression(dict(comp_stats))
             except CodePilotError as e:
                 await display.on_error(f"压缩失败: {e}")
@@ -688,8 +832,22 @@ class App:
             display.show_sessions(cast(list[dict[str, Any]], sessions))
             return False
 
+        if cmd == "/cost":
+            report = self._cost_tracker.format_report()
+            display.console.print(f"[cyan]{report}[/cyan]")
+            return False
+
         if cmd == "/export":
             return self._handle_export_command(arg)
+
+        if cmd == "/debug":
+            return self._handle_debug_command(arg)
+
+        if cmd == "/mcp":
+            return self._handle_mcp_command()
+
+        if cmd == "/memory":
+            return self._handle_memory_command(arg)
 
         # 未知命令
         await display.on_error(f"未知命令: {cmd}（输入 /help 查看可用命令）")
@@ -895,6 +1053,96 @@ class App:
             display.console.print(f"[bold red]导出失败: {e}[/bold red]")
         return False
 
+    def _handle_debug_command(self, arg: str) -> bool:
+        """处理 /debug 命令，控制调试模式。
+
+        Args:
+            arg: 子命令（on/off/context/tools），为空时显示当前状态。
+
+        Returns:
+            False 表示继续 REPL。
+        """
+        display = self.display
+        subcmd = arg.strip().lower()
+
+        if subcmd == "on":
+            self._debug_mode = True
+            display.console.print("[green]Debug mode enabled[/green]")
+        elif subcmd == "off":
+            self._debug_mode = False
+            display.console.print("[green]Debug mode disabled[/green]")
+        elif subcmd == "context":
+            # 显示当前上下文消息数和 token 数
+            stats = self.context_manager.get_stats()
+            display.console.print(
+                f"[cyan]Debug Context[/cyan]\n"
+                f"  消息数: {stats['message_count']}\n"
+                f"  Token 数: {stats['total_tokens']}/{stats['max_tokens']}\n"
+                f"  利用率: {stats['utilization']:.1%}\n"
+                f"  压缩次数: {stats['compression_count']}"
+            )
+        elif subcmd == "tools":
+            # 显示工具注册表状态
+            tools = self.tool_registry.list_tools()
+            tool_lines = "\n".join(f"  - {t.name}" for t in tools)
+            display.console.print(f"[cyan]Debug Tools[/cyan]\n{tool_lines}")
+        else:
+            status = "on" if self._debug_mode else "off"
+            display.console.print(f"[cyan]Debug mode: {status}[/cyan]")
+            display.console.print("[dim]用法: /debug [on|off|context|tools][/dim]")
+        return False
+
+    def _handle_mcp_command(self) -> bool:
+        """处理 /mcp 命令，显示 MCP 连接状态。"""
+        display = self.display
+        if self.mcp_manager is None:
+            display.console.print("[yellow]未配置 MCP 服务器[/yellow]")
+            return False
+        status = self.mcp_manager.get_status()
+        lines = ["[cyan]MCP Server Status[/cyan]"]
+        for name, info in status.get("servers", {}).items():
+            connected = "connected" if info["connected"] else "disconnected"
+            lines.append(f"  {name}: {connected} ({info['tools']} tools)")
+        display.console.print("\n".join(lines))
+        return False
+
+    def _handle_memory_command(self, arg: str) -> bool:
+        """处理 /memory 命令，管理跨会话记忆。"""
+        display = self.display
+        if self.memory_manager is None:
+            display.console.print("[yellow]记忆系统未初始化[/yellow]")
+            return False
+        subcmd = arg.strip().lower()
+        if subcmd.startswith("add "):
+            text = arg.strip()[4:].strip()
+            if text:
+                self.memory_manager.save_project_memory(text)
+                display.console.print(f"[green]已保存记忆: {text[:50]}[/green]")
+            else:
+                display.console.print("[yellow]请输入记忆内容[/yellow]")
+        elif subcmd == "clear":
+            self.memory_manager._project_memories.clear()
+            self.memory_manager._global_memories.clear()
+            self.memory_manager._save_project_memories_file()
+            self.memory_manager._save_global_memories_file()
+            display.console.print("[green]所有记忆已清除[/green]")
+        else:
+            memories = self.memory_manager.list_memories()
+            lines = ["[cyan]Memory[/cyan]"]
+            if memories["project"]:
+                lines.append("  Project:")
+                for i, m in enumerate(memories["project"]):
+                    lines.append(f"    [{i}] {m}")
+            if memories["global"]:
+                lines.append("  Global:")
+                for i, m in enumerate(memories["global"]):
+                    lines.append(f"    [{i}] {m.get('text', '')}")
+            if not memories["project"] and not memories["global"]:
+                lines.append("  (empty)")
+            lines.append("[dim]用法: /memory add <text> | /memory clear[/dim]")
+            display.console.print("\n".join(lines))
+        return False
+
     async def resume_from_history(self, session_id: str | None = None) -> bool:
         """加载历史会话消息注入 context_manager，实现断点续跑。
 
@@ -951,4 +1199,4 @@ def create_app(config: Config) -> App:
     return App(config)
 
 
-__all__ = ["App", "create_app", "UndoTracker", "TrackedToolWrapper"]
+__all__ = ["App", "create_app", "UndoTracker", "TrackedToolWrapper", "MCPToolWrapper"]

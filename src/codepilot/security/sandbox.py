@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 from typing import NamedTuple
+from urllib.parse import unquote
 
 import structlog
 
@@ -100,11 +101,29 @@ _SENSITIVE_FILENAMES: frozenset[str] = frozenset(
     {
         ".codepilot.yml",
         ".codepilot_history.jsonl",
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+    }
+)
+
+# .git 目录内写操作额外检查的敏感文件名/目录名
+_GIT_SENSITIVE_NAMES: frozenset[str] = frozenset(
+    {
+        "COMMIT_EDITMSG",
+        "config",
+        "index",
+        "HEAD",
+        "hooks",
     }
 )
 
 # 链式命令分隔符正则：|| 必须在 | 之前匹配
 _CHAIN_SPLIT_PATTERN = re.compile(r"\|\||&&|\||;")
+
+# 重定向正则：匹配 > 或 >> 后面的路径
+_REDIRECT_PATTERN = re.compile(r">{1,2}\s*(\S+)")
 
 
 def _norm(path: str) -> str:
@@ -207,6 +226,23 @@ class Sandbox:
         if not path:
             return ValidationResult(False, "empty path")
 
+        # 空白路径检查（strip 后为空）
+        if not path.strip():
+            return ValidationResult(False, "empty path")
+
+        # Null byte 注入检查
+        if '\x00' in path:
+            return ValidationResult(False, "null byte in path")
+
+        # 过长路径检查
+        if len(path) > 4096:
+            return ValidationResult(False, "path too long")
+
+        # URL 编码变体绕过检查：双重解码后与原路径不同则使用解码版本
+        decoded_path = unquote(unquote(path))
+        if decoded_path != path:
+            path = decoded_path
+
         logger.debug("路径校验开始", path=path, operation=operation)
 
         # 1. 解析为绝对路径（realpath 解析符号链接与 .. ）
@@ -279,6 +315,10 @@ class Sandbox:
         basename = os.path.basename(resolved)
         if basename in _SENSITIVE_FILENAMES:
             return basename
+        # .git 目录内写操作额外检查敏感文件名
+        if ".git" in parts:
+            if basename in _GIT_SENSITIVE_NAMES:
+                return f".git/{basename}"
         return ""
 
     # ------------------------------------------------------------------
@@ -297,6 +337,23 @@ class Sandbox:
             return ValidationResult(False, "empty command")
 
         logger.debug("命令校验开始", command=command)
+
+        # 重定向到 workspace 外检测
+        for match in _REDIRECT_PATTERN.finditer(command):
+            redirect_path = match.group(1)
+            # 判断是否为绝对路径（兼容 Windows 和 Unix 风格）
+            is_abs = os.path.isabs(redirect_path) or redirect_path.startswith("/")
+            if is_abs:
+                if not _is_subpath(redirect_path, self.workspace_root):
+                    logger.warning(
+                        "重定向到 workspace 外",
+                        command=command,
+                        redirect_path=redirect_path,
+                    )
+                    return ValidationResult(
+                        False,
+                        f"redirect to path outside workspace not allowed: {redirect_path}",
+                    )
 
         # 拆解链式命令
         segments = _CHAIN_SPLIT_PATTERN.split(command)

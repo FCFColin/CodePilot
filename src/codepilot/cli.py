@@ -47,6 +47,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--config", help="配置文件路径")
     parser.add_argument("--verbose", action="store_true", help="详细日志")
+    parser.add_argument("--show-tools", action="store_true", help="显示工具调用的完整参数和结果")
+    parser.add_argument("--dry-run", action="store_true", help="模拟运行（不实际执行）")
     parser.add_argument(
         "-c",
         "--continue",

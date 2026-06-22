@@ -38,6 +38,25 @@ _INTERACTIVE_COMMANDS: frozenset[str] = frozenset(
 # 提权命令前缀：禁止以这些 token 开头
 _PRIVILEGE_PREFIXES: frozenset[str] = frozenset({"sudo", "su"})
 
+# 命令执行器前缀：带 -c/-e 参数时禁止（代码执行模式）
+_COMMAND_EXECUTOR_PREFIXES: frozenset[str] = frozenset(
+    {
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "dash",
+        "python",
+        "python3",
+        "node",
+        "ruby",
+        "perl",
+    }
+)
+
+# 无条件禁止的命令执行器（eval/exec 本身就是代码执行）
+_UNCONDITIONAL_EXECUTOR_PREFIXES: frozenset[str] = frozenset({"eval", "exec"})
+
 
 def _first_token(command: str) -> str:
     """提取命令第一个 token（原始大小写），用于前缀匹配。
@@ -84,6 +103,24 @@ class CommandFilter:
         if not command or not command.strip():
             return False, "empty command"
 
+        # 0. 命令替换检测
+        if "$(" in command:
+            return False, "command substitution not allowed: $()"
+        if "`" in command:
+            return False, "command substitution not allowed: backticks"
+
+        # 0.1 历史展开检测
+        if re.search(r"![!$\w]", command):
+            return False, "history expansion not allowed"
+
+        # 0.2 Here-string 检测
+        if "<<<" in command:
+            return False, "here-string not allowed"
+
+        # 0.3 进程替换检测
+        if "<(" in command or ">(" in command:
+            return False, "process substitution not allowed"
+
         # 1. 黑名单
         blocked, pattern = self.is_blacklisted(command)
         if blocked:
@@ -95,6 +132,19 @@ class CommandFilter:
         if first.lower() in _PRIVILEGE_PREFIXES:
             logger.warning("拒绝提权命令", command=command, prefix=first)
             return False, f"privilege escalation command not allowed: {first}"
+
+        # 2.5 命令执行器检测
+        if first.lower() in _UNCONDITIONAL_EXECUTOR_PREFIXES:
+            logger.warning(
+                "拒绝命令执行器", command=command, prefix=first
+            )
+            return False, f"command executor not allowed: {first}"
+        if first.lower() in _COMMAND_EXECUTOR_PREFIXES:
+            if re.search(r"-[ce]\b", command):
+                logger.warning(
+                    "拒绝命令执行器代码执行", command=command, prefix=first
+                )
+                return False, f"command executor with code execution not allowed: {first} -c/-e"
 
         # 3. 交互式命令
         if self.is_interactive(command):

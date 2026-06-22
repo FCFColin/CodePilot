@@ -13,6 +13,7 @@ import structlog
 
 from codepilot.config import ContextConfig
 from codepilot.context.compressor import CompressionStats, ContextCompressor
+from codepilot.context.layered_compressor import LayeredCompressor
 from codepilot.context.token_counter import TokenCounter
 from codepilot.providers.base import Message
 
@@ -65,6 +66,8 @@ class ContextManager:
         self._usage: dict[str, int] = {"input": 0, "output": 0}
         # 压缩次数累计
         self._compression_count: int = 0
+        # 分层压缩器
+        self._layered_compressor = LayeredCompressor()
 
         # 初始化时计算 system_prompt 的 token
         self._recalculate_tokens()
@@ -182,6 +185,7 @@ class ContextManager:
     async def _do_compress(self) -> CompressionStats:
         """实际执行压缩（调用方已持有锁）。
 
+        - 配置启用分层压缩时使用 LayeredCompressor
         - compressor 可用时调用 compressor.compress
         - compressor 为 None 时用 truncate 策略（内联实现）
         压缩后：将可压缩区消息替换为 summary，更新 total_tokens。
@@ -195,6 +199,12 @@ class ContextManager:
             )
 
         before_tokens = self.total_tokens
+
+        # 分层压缩路径
+        if self.config.use_layered_compression:
+            stats = await self._do_layered_compress(before_tokens)
+            self._compression_count += 1
+            return stats
 
         # 分区：可压缩区 + 保留区
         compressible, preserved = self._split_messages(
@@ -212,7 +222,7 @@ class ContextManager:
 
         # 执行压缩
         if self.compressor is not None:
-            summary, stats = await self.compressor.compress(
+            summary, stats, summary_message = await self.compressor.compress(
                 self.messages,
                 preserve_recent_turns=self.config.preserve_recent_turns,
                 max_tokens=self.config.max_tokens,
@@ -245,6 +255,65 @@ class ContextManager:
             messages_compressed=stats["messages_compressed"],
             strategy=stats["strategy"],
             compression_count=self._compression_count,
+        )
+        return stats
+
+    async def _do_layered_compress(self, before_tokens: int) -> CompressionStats:
+        """使用 LayeredCompressor 执行分层压缩（调用方已持有锁）。"""
+        # 将 Message 对象转为 dict 格式供 LayeredCompressor 使用
+        dict_messages = [
+            {"role": m.role, "content": m.content} for m in self.messages
+        ]
+
+        # 获取 provider（用于 Layer 2 LLM 摘要）
+        provider = None
+        if self.compressor is not None and hasattr(self.compressor, "provider"):
+            provider = self.compressor.provider
+
+        compressed, layered_stats = await self._layered_compressor.compress(
+            messages=dict_messages,
+            system_prompt=self.system_prompt,
+            current_tokens=self.total_tokens,
+            max_tokens=self.config.max_tokens,
+            provider=provider,
+        )
+
+        # 将 dict 消息转回 Message 对象
+        self.messages = [
+            Message(role=m["role"], content=m.get("content", ""))
+            for m in compressed
+            if not m.get("_compressed")
+        ]
+
+        # 提取压缩摘要
+        summary_parts = []
+        for m in compressed:
+            if m.get("_compressed"):
+                summary_parts.append(m.get("content", ""))
+
+        if summary_parts:
+            new_summary = "\n\n".join(summary_parts)
+            if self.compressed_summary:
+                self.compressed_summary = self.compressed_summary + "\n\n" + new_summary
+            else:
+                self.compressed_summary = new_summary
+
+        self._recalculate_tokens()
+
+        # 转换为 CompressionStats 格式
+        stats = CompressionStats(
+            before_tokens=before_tokens,
+            after_tokens=self.total_tokens,
+            messages_compressed=layered_stats.messages_compressed,
+            strategy="layered:" + "+".join(layered_stats.layers_applied) if layered_stats.layers_applied else "layered:none",
+        )
+
+        logger.info(
+            "分层压缩完成",
+            before_tokens=before_tokens,
+            after_tokens=self.total_tokens,
+            layers_applied=layered_stats.layers_applied,
+            compression_count=self._compression_count + 1,
         )
         return stats
 

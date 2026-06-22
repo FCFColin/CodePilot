@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -44,6 +45,18 @@ from codepilot.providers.base import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _repair_json(s: str) -> str:
+    """尝试修复常见的 JSON 格式错误。"""
+    # 补全未闭合的括号
+    open_braces = s.count('{') - s.count('}')
+    s += '}' * max(0, open_braces)
+    open_brackets = s.count('[') - s.count(']')
+    s += ']' * max(0, open_brackets)
+    # 删除尾随逗号（在补全括号之后，确保能匹配到逗号+闭合括号）
+    s = re.sub(r',\s*([}\]])', r'\1', s)
+    return s
 
 
 class AnthropicProvider(BaseProvider):
@@ -200,13 +213,29 @@ class AnthropicProvider(BaseProvider):
                     ):
                         tc_data = pending_tool_calls.get(current_block_index)
                         if tc_data:
-                            try:
-                                arguments = (
-                                    json.loads(tc_data["arguments"])
-                                    if tc_data["arguments"]
-                                    else {}
-                                )
-                            except json.JSONDecodeError:
+                            arguments_str = tc_data["arguments"]
+                            if arguments_str:
+                                try:
+                                    arguments = json.loads(arguments_str)
+                                except json.JSONDecodeError:
+                                    try:
+                                        arguments = json.loads(
+                                            _repair_json(arguments_str)
+                                        )
+                                        logger.warning(
+                                            "工具调用参数 JSON 修复成功",
+                                            raw=arguments_str[:100],
+                                        )
+                                    except json.JSONDecodeError:
+                                        logger.error(
+                                            "工具调用参数 JSON 无法修复",
+                                            raw=arguments_str[:200],
+                                        )
+                                        arguments = {
+                                            "_error": "invalid JSON",
+                                            "_raw": arguments_str[:500],
+                                        }
+                            else:
                                 arguments = {}
                             yield ToolCall(
                                 id=tc_data["id"],
@@ -252,6 +281,16 @@ class AnthropicProvider(BaseProvider):
             elif block.type == "tool_use":
                 # input 已是 dict
                 arguments = block.input if isinstance(block.input, dict) else {}
+                # 若 input 不是有效 dict（罕见），尝试修复
+                if not arguments and hasattr(block, "input"):
+                    input_str = str(block.input)
+                    try:
+                        arguments = json.loads(input_str)
+                    except (json.JSONDecodeError, TypeError):
+                        try:
+                            arguments = json.loads(_repair_json(input_str))
+                        except (json.JSONDecodeError, TypeError):
+                            arguments = {}
                 yield ToolCall(
                     id=block.id,
                     name=block.name,
@@ -266,10 +305,13 @@ class AnthropicProvider(BaseProvider):
         """将 Message 列表转换为 Anthropic 消息格式。
 
         - str content → {"role", "content"} 格式
-        - list content → 透传（Anthropic content blocks）
+        - list content → 透传（Anthropic content blocks，含 thinking blocks）
         - 原始 dict → 透传（如 format_tool_result 的输出）
         - 嵌套 dict content（含 role 键）→ 提取内部 dict
           （format 方法输出存为 content 时的还原）
+
+        注意：assistant 消息中的 thinking blocks 必须被原样保留传回 API
+        （Anthropic 要求），因此 list content 直接透传不做过滤。
         """
         result: list[dict[str, Any]] = []
         for msg in messages:
@@ -285,6 +327,8 @@ class AnthropicProvider(BaseProvider):
                 # content 是完整的消息 dict（来自 format 方法）
                 result.append(msg.content)
             else:
+                # list content 直接透传（保留 thinking blocks）；
+                # str content 转为标准格式
                 result.append({"role": msg.role, "content": msg.content})
         return result
 
@@ -304,13 +348,15 @@ class AnthropicProvider(BaseProvider):
         Returns:
             Anthropic 格式的 tool_result 消息（TypedDict）：
             {"role": "user", "content": [{"type": "tool_result",
-             "tool_use_id": "...", "content": "..."}]}
+             "tool_use_id": "...", "content": "...", "is_error": bool?}]}
         """
         block: AnthropicToolResultBlock = {
             "type": "tool_result",
             "tool_use_id": tool_call_id,
             "content": content,
         }
+        if content.startswith("Error"):
+            block["is_error"] = True
         return {
             "role": role,
             "content": [block],

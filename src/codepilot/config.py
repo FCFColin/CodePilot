@@ -125,6 +125,7 @@ class ContextConfig(BaseModel):
     compression_strategy: str = "summary"  # summary | truncate | hybrid
     save_full_history: bool = True
     history_file: str = ".codepilot_history.jsonl"
+    use_layered_compression: bool = False  # 启用分层压缩（LayeredCompressor）
 
 
 class UIConfig(BaseModel):
@@ -214,6 +215,9 @@ class Config(BaseSettings):
     git: GitConfig = Field(default_factory=GitConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     repomap: RepoMapConfig = Field(default_factory=RepoMapConfig)
+    show_tools: bool = False
+    dry_run: bool = False
+    mcp_servers: dict[str, dict] = Field(default_factory=dict)
 
     @field_validator("provider")
     @classmethod
@@ -490,6 +494,14 @@ def _apply_cli_args(config: Config, args: argparse.Namespace) -> Config:
     if no_auto_commit:
         new_git = config.git.model_copy(update={"auto_commit": False})
         updates["git"] = new_git
+
+    show_tools = getattr(args, "show_tools", False)
+    if show_tools:
+        updates["show_tools"] = True
+
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        updates["dry_run"] = True
 
     return config.model_copy(update=updates)
 

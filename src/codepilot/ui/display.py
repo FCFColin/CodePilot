@@ -676,6 +676,8 @@ class DisplayManager:
             ("/plan", "显示当前执行计划"),
             ("/sessions", "显示最近 10 个会话"),
             ("/export [md|json]", "导出当前会话到文件"),
+            ("/debug [on|off|context|tools]", "调试模式控制"),
+            ("/cost", "显示本次会话费用估算"),
             ("/quit 或 /exit", "退出"),
         ]
         for cmd, desc in commands:

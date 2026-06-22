@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import signal
 import time
 from typing import Any
 
@@ -31,6 +33,8 @@ _FORBIDDEN_INTERACTIVE: set[str] = {
 _MAX_OUTPUT_LINES = 200
 # 输出截断：每行最大字符数
 _MAX_LINE_LENGTH = 2000
+# 输出截断：最大总字节数
+_MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1MB
 
 
 class ShellExecTool(BaseTool):
@@ -43,6 +47,9 @@ class ShellExecTool(BaseTool):
         "禁止交互式命令（vim/nano/less/more/top/htop/man）。"
         "操作前需审批确认。"
     )
+
+    # ANSI 转义序列正则
+    _ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[.*?[a-zA-Z]')
 
     def __init__(
         self,
@@ -123,11 +130,17 @@ class ShellExecTool(BaseTool):
 
         start_time = time.monotonic()
         try:
+            # Windows 不支持 os.setsid 和 os.killpg，需要条件处理
+            if os.name != 'nt':
+                preexec_fn = os.setsid
+            else:
+                preexec_fn = None
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                preexec_fn=preexec_fn,
             )
         except OSError as e:
             logger.error("启动命令失败", command=command, error=str(e))
@@ -139,12 +152,15 @@ class ShellExecTool(BaseTool):
                 timeout=timeout,
             )
         except TimeoutError:
-            # 超时杀进程
-            try:
+            # 超时杀进程：Unix 使用进程组，Windows 使用 process.kill
+            if os.name != 'nt' and process.pid:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            else:
                 process.kill()
-                await process.wait()
-            except ProcessLookupError:
-                pass
+            await process.wait()
             duration_ms = int((time.monotonic() - start_time) * 1000)
             logger.warning("命令超时", command=command, timeout=timeout)
             return (
@@ -156,9 +172,20 @@ class ShellExecTool(BaseTool):
         duration_ms = int((time.monotonic() - start_time) * 1000)
         exit_code = process.returncode if process.returncode is not None else -1
 
+        # 最大输出大小限制
+        total_bytes = len(stdout_bytes) + len(stderr_bytes)
+        if total_bytes > _MAX_OUTPUT_BYTES:
+            stdout_bytes = stdout_bytes[:_MAX_OUTPUT_BYTES]
+            remaining = _MAX_OUTPUT_BYTES - len(stdout_bytes)
+            stderr_bytes = stderr_bytes[:max(0, remaining)]
+
         # 解码输出
         stdout_text = stdout_bytes.decode("utf-8", errors="replace")
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+
+        # 过滤 ANSI 转义序列
+        stdout_text = self._strip_ansi(stdout_text)
+        stderr_text = self._strip_ansi(stderr_text)
 
         # 截断输出
         stdout_truncated, stdout_was_truncated = self._truncate_output(stdout_text)
@@ -180,6 +207,10 @@ class ShellExecTool(BaseTool):
             duration_ms=duration_ms,
         )
         return result
+
+    def _strip_ansi(self, text: str) -> str:
+        """移除 ANSI 转义序列，防止终端污染。"""
+        return self._ANSI_ESCAPE.sub('', text)
 
     def _truncate_output(self, text: str) -> tuple[str, bool]:
         """截断输出：最多 200 行，每行最多 2000 字符。

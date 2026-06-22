@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import os
+import tempfile
 from typing import Any
 
 import structlog
@@ -165,14 +166,32 @@ class EditFileTool(BaseTool):
             raise ToolError(f"读取文件失败: {e}") from e
 
     def _write_file(self, abs_path: str, content: str) -> None:
-        """同步写入文件。
+        """原子写入文件：先写临时文件，再 rename 替换。
 
         Raises:
             ToolError: 写入失败时抛出。
         """
+        parent = os.path.dirname(abs_path)
         try:
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
+            # 原子写入：先写临时文件
+            fd, tmp_path = tempfile.mkstemp(
+                suffix='.tmp',
+                dir=parent,
+            )
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                # 原子替换
+                os.replace(tmp_path, abs_path)
+            except BaseException:
+                # 清理临时文件
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             raise ToolError(f"写入文件失败: {e}") from e
 
