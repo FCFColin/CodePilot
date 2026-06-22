@@ -14,13 +14,10 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from codepilot.config import (
-    AnthropicConfig,
     Config,
     ContextConfig,
-    DeepSeekConfig,
     ProviderConfig,
     _load_yaml_config,
-    _migrate_legacy_config,
     _substitute_env_vars,
     load_config,
     validate_config,
@@ -77,17 +74,16 @@ class TestConfigModel:
         """默认配置值正确。"""
         _clear_codepilot_env(monkeypatch)
         config = Config()
-        assert config.provider == "deepseek"
+        assert config.provider == "xunfei"
+        assert "xunfei" in config.providers
+        assert "deepseek" in config.providers
         assert (
-            config.deepseek.base_url
+            config.providers["xunfei"].base_url
             == "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
         )
-        assert (
-            config.anthropic.base_url
-            == "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
-        )
-        assert config.deepseek.model == "astron-code-latest"
-        assert config.anthropic.model == "astron-code-latest"
+        assert config.providers["deepseek"].base_url == "https://api.deepseek.com"
+        assert config.providers["xunfei"].model == "astron-code-latest"
+        assert config.providers["deepseek"].model == "deepseek-reasoner"
 
     def test_default_security_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """安全配置默认值正确。"""
@@ -112,14 +108,16 @@ class TestConfigModel:
         """API Key 使用 SecretStr 类型。"""
         _clear_codepilot_env(monkeypatch)
         config = Config()
-        assert isinstance(config.deepseek.api_key, SecretStr)
-        assert isinstance(config.anthropic.api_key, SecretStr)
+        assert isinstance(config.providers["xunfei"].api_key, SecretStr)
+        assert isinstance(config.providers["deepseek"].api_key, SecretStr)
 
     def test_secretstr_not_in_repr(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SecretStr 不在 repr 中暴露明文。"""
         _clear_codepilot_env(monkeypatch)
         config = Config(
-            deepseek=DeepSeekConfig(api_key=SecretStr("sk-secret-key-12345"))
+            providers={
+                "test": ProviderConfig(api_key=SecretStr("sk-secret-key-12345")),
+            }
         )
         repr_str = repr(config)
         assert "sk-secret-key-12345" not in repr_str
@@ -128,7 +126,9 @@ class TestConfigModel:
         """SecretStr 不在 str() 中暴露明文。"""
         _clear_codepilot_env(monkeypatch)
         config = Config(
-            anthropic=AnthropicConfig(api_key=SecretStr("sk-ant-secret-999"))
+            providers={
+                "test": ProviderConfig(api_key=SecretStr("sk-ant-secret-999")),
+            }
         )
         str_str = str(config)
         assert "sk-ant-secret-999" not in str_str
@@ -140,27 +140,9 @@ class TestEnvVarOverride:
     def test_codepilot_provider_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CODEPILOT_PROVIDER 环境变量覆盖 provider。"""
         _clear_codepilot_env(monkeypatch)
-        monkeypatch.setenv("CODEPILOT_PROVIDER", "anthropic")
+        monkeypatch.setenv("CODEPILOT_PROVIDER", "deepseek")
         config = Config()
-        assert config.provider == "anthropic"
-
-    def test_codepilot_deepseek_api_key_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """CODEPILOT_DEEPSEEK__API_KEY 嵌套环境变量覆盖。"""
-        _clear_codepilot_env(monkeypatch)
-        monkeypatch.setenv("CODEPILOT_DEEPSEEK__API_KEY", "sk-deepseek-env")
-        config = Config()
-        assert config.deepseek.api_key.get_secret_value() == "sk-deepseek-env"
-
-    def test_codepilot_anthropic_api_key_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """CODEPILOT_ANTHROPIC__API_KEY 嵌套环境变量覆盖。"""
-        _clear_codepilot_env(monkeypatch)
-        monkeypatch.setenv("CODEPILOT_ANTHROPIC__API_KEY", "sk-anthropic-env")
-        config = Config()
-        assert config.anthropic.api_key.get_secret_value() == "sk-anthropic-env"
+        assert config.provider == "deepseek"
 
     def test_codepilot_api_key_convenience_var(
         self, monkeypatch: pytest.MonkeyPatch
@@ -170,8 +152,8 @@ class TestEnvVarOverride:
         _mock_no_yaml(monkeypatch)
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-convenience")
         config = load_config()
-        # 默认 provider 为 deepseek，CODEPILOT_API_KEY 应覆盖 deepseek.api_key
-        assert config.deepseek.api_key.get_secret_value() == "sk-convenience"
+        # 默认 provider 为 xunfei，CODEPILOT_API_KEY 应覆盖 xunfei 的 api_key
+        assert config.providers["xunfei"].api_key.get_secret_value() == "sk-convenience"
 
     def test_codepilot_api_key_follows_provider(
         self, monkeypatch: pytest.MonkeyPatch
@@ -180,12 +162,12 @@ class TestEnvVarOverride:
         _clear_codepilot_env(monkeypatch)
         _mock_no_yaml(monkeypatch)
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-follows")
-        monkeypatch.setenv("CODEPILOT_PROVIDER", "anthropic")
+        monkeypatch.setenv("CODEPILOT_PROVIDER", "deepseek")
         config = load_config()
-        assert config.provider == "anthropic"
-        assert config.anthropic.api_key.get_secret_value() == "sk-follows"
-        # deepseek.api_key 不受影响
-        assert config.deepseek.api_key.get_secret_value() == ""
+        assert config.provider == "deepseek"
+        assert config.providers["deepseek"].api_key.get_secret_value() == "sk-follows"
+        # xunfei 的 api_key 不受影响
+        assert config.providers["xunfei"].api_key.get_secret_value() == ""
 
 
 class TestYamlLoading:
@@ -195,16 +177,17 @@ class TestYamlLoading:
         """YAML 配置文件加载。"""
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            "provider: anthropic\n"
-            "deepseek:\n"
-            "  model: custom-model\n"
-            "  max_tokens: 4096\n",
+            "provider: deepseek\n"
+            "providers:\n"
+            "  deepseek:\n"
+            "    model: custom-model\n"
+            "    max_tokens: 4096\n",
             encoding="utf-8",
         )
         data = _load_yaml_config(str(yaml_file))
-        assert data["provider"] == "anthropic"
-        assert data["deepseek"]["model"] == "custom-model"
-        assert data["deepseek"]["max_tokens"] == 4096
+        assert data["provider"] == "deepseek"
+        assert data["providers"]["deepseek"]["model"] == "custom-model"
+        assert data["providers"]["deepseek"]["max_tokens"] == 4096
 
     def test_load_yaml_config_not_found(self) -> None:
         """文件不存在时返回空字典。"""
@@ -218,11 +201,11 @@ class TestYamlLoading:
         monkeypatch.setenv("MY_TEST_API_KEY", "sk-from-env-var")
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            'deepseek:\n  api_key: "${MY_TEST_API_KEY}"\n',
+            'providers:\n  xunfei:\n    api_key: "${MY_TEST_API_KEY}"\n',
             encoding="utf-8",
         )
         data = _load_yaml_config(str(yaml_file))
-        assert data["deepseek"]["api_key"] == "sk-from-env-var"
+        assert data["providers"]["xunfei"]["api_key"] == "sk-from-env-var"
 
     def test_env_var_substitution_unset(self) -> None:
         """未设置的环境变量替换为空字符串。"""
@@ -236,15 +219,16 @@ class TestYamlLoading:
         monkeypatch.setenv("TEST_MODEL", "gpt-test")
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            "deepseek:\n"
-            '  model: "${TEST_MODEL}"\n'
-            "  thinking:\n"
-            '    reasoning_effort: "${TEST_MODEL}"\n',
+            "providers:\n"
+            "  xunfei:\n"
+            '    model: "${TEST_MODEL}"\n'
+            "    thinking:\n"
+            '      reasoning_effort: "${TEST_MODEL}"\n',
             encoding="utf-8",
         )
         data = _load_yaml_config(str(yaml_file))
-        assert data["deepseek"]["model"] == "gpt-test"
-        assert data["deepseek"]["thinking"]["reasoning_effort"] == "gpt-test"
+        assert data["providers"]["xunfei"]["model"] == "gpt-test"
+        assert data["providers"]["xunfei"]["thinking"]["reasoning_effort"] == "gpt-test"
 
     def test_load_config_with_yaml(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
@@ -254,12 +238,12 @@ class TestYamlLoading:
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-test")
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            "deepseek:\n  model: yaml-model\n  max_tokens: 2048\n",
+            "provider: xunfei\nproviders:\n  xunfei:\n    model: yaml-model\n    max_tokens: 2048\n",
             encoding="utf-8",
         )
         config = load_config(config_path=str(yaml_file))
-        assert config.deepseek.model == "yaml-model"
-        assert config.deepseek.max_tokens == 2048
+        assert config.providers["xunfei"].model == "yaml-model"
+        assert config.providers["xunfei"].max_tokens == 2048
 
 
 class TestPriority:
@@ -269,27 +253,27 @@ class TestPriority:
         """CLI 参数覆盖环境变量。"""
         _clear_codepilot_env(monkeypatch)
         _mock_no_yaml(monkeypatch)
-        monkeypatch.setenv("CODEPILOT_PROVIDER", "anthropic")
+        monkeypatch.setenv("CODEPILOT_PROVIDER", "deepseek")
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-env")
-        args = _make_args(provider="deepseek", api_key="sk-cli")
+        args = _make_args(provider="xunfei", api_key="sk-cli")
         config = load_config(args)
-        assert config.provider == "deepseek"
-        assert config.deepseek.api_key.get_secret_value() == "sk-cli"
+        assert config.provider == "xunfei"
+        assert config.providers["xunfei"].api_key.get_secret_value() == "sk-cli"
 
     def test_env_override_yaml(self, tmp_path, monkeypatch):
         """环境变量覆盖 YAML。"""
         _clear_codepilot_env(monkeypatch)
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            "provider: deepseek\ndeepseek:\n  api_key: sk-yaml\n  model: yaml-model\n",
+            "provider: xunfei\nproviders:\n  xunfei:\n    api_key: sk-yaml\n    model: yaml-model\n",
             encoding="utf-8",
         )
         # 环境变量覆盖 api_key
-        monkeypatch.setenv("CODEPILOT_DEEPSEEK__API_KEY", "sk-env")
+        monkeypatch.setenv("CODEPILOT_PROVIDERS__XUNFEI__API_KEY", "sk-env")
         config = load_config(config_path=str(yaml_file))
-        assert config.deepseek.api_key.get_secret_value() == "sk-env"
+        assert config.providers["xunfei"].api_key.get_secret_value() == "sk-env"
         # YAML 的 model 应保留（环境变量未覆盖）
-        assert config.deepseek.model == "yaml-model"
+        assert config.providers["xunfei"].model == "yaml-model"
 
     def test_cli_args_override_yaml(self, tmp_path, monkeypatch):
         """CLI 参数覆盖 YAML。"""
@@ -297,12 +281,12 @@ class TestPriority:
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-base")
         yaml_file = tmp_path / ".codepilot.yml"
         yaml_file.write_text(
-            "deepseek:\n  model: yaml-model\n",
+            "provider: xunfei\nproviders:\n  xunfei:\n    model: yaml-model\n",
             encoding="utf-8",
         )
         args = _make_args(model="cli-model")
         config = load_config(args, config_path=str(yaml_file))
-        assert config.deepseek.model == "cli-model"
+        assert config.providers["xunfei"].model == "cli-model"
 
     def test_yaml_override_defaults(self, tmp_path, monkeypatch):
         """YAML 覆盖默认值。"""
@@ -354,26 +338,32 @@ class TestFailFast:
     def test_with_api_key_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """有 API Key 时验证通过。"""
         _clear_codepilot_env(monkeypatch)
-        config = Config(deepseek=DeepSeekConfig(api_key=SecretStr("sk-test")))
+        config = Config(
+            providers={
+                "xunfei": ProviderConfig(api_key=SecretStr("sk-test")),
+            }
+        )
         validate_config(config)  # 不抛异常
 
-    def test_anthropic_missing_api_key_raises(
+    def test_deepseek_missing_api_key_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """anthropic provider 缺少 API Key 时抛出 ConfigError。"""
+        """deepseek provider 缺少 API Key 时抛出 ConfigError。"""
         _clear_codepilot_env(monkeypatch)
-        config = Config(provider="anthropic")
+        config = Config(provider="deepseek")
         with pytest.raises(ConfigError):
             validate_config(config)
 
-    def test_anthropic_with_api_key_passes(
+    def test_deepseek_with_api_key_passes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """anthropic provider 有 API Key 时验证通过。"""
+        """deepseek provider 有 API Key 时验证通过。"""
         _clear_codepilot_env(monkeypatch)
         config = Config(
-            provider="anthropic",
-            anthropic=AnthropicConfig(api_key=SecretStr("sk-ant-test")),
+            provider="deepseek",
+            providers={
+                "deepseek": ProviderConfig(api_key=SecretStr("sk-ds-test")),
+            },
         )
         validate_config(config)  # 不抛异常
 
@@ -404,11 +394,6 @@ class TestInvalidConfig:
         )
         with pytest.raises(ConfigError):
             validate_config(config)
-
-    def test_invalid_temperature_type_raises(self) -> None:
-        """无效 temperature 类型触发 ValidationError。"""
-        with pytest.raises(ValidationError):
-            DeepSeekConfig(temperature="not-a-number")  # type: ignore[arg-type]
 
     def test_invalid_max_tokens_type_raises(self) -> None:
         """无效 max_tokens 类型触发 ValidationError。"""
@@ -462,74 +447,6 @@ class TestProviderConfig:
         assert config.providers["myprovider"].model == "test-model"
 
 
-class TestMigrateLegacyConfig:
-    """旧格式迁移测试。"""
-
-    def test_migrate_deepseek_to_providers(self) -> None:
-        """deepseek: 段自动迁移为 providers.deepseek。"""
-        yaml_data: dict[str, Any] = {
-            "deepseek": {
-                "api_key": "sk-test",
-                "base_url": "https://example.com/v1",
-                "model": "test-model",
-            }
-        }
-        result = _migrate_legacy_config(yaml_data)
-        assert "providers" in result
-        assert "deepseek" in result["providers"]
-        assert result["providers"]["deepseek"]["type"] == "openai"
-        assert result["providers"]["deepseek"]["model"] == "test-model"
-
-    def test_migrate_anthropic_to_providers(self) -> None:
-        """anthropic: 段自动迁移为 providers.anthropic。"""
-        yaml_data: dict[str, Any] = {
-            "anthropic": {
-                "api_key": "sk-ant-test",
-                "base_url": "https://api.anthropic.com",
-                "model": "claude-3",
-            }
-        }
-        result = _migrate_legacy_config(yaml_data)
-        assert "providers" in result
-        assert "anthropic" in result["providers"]
-        assert result["providers"]["anthropic"]["type"] == "anthropic"
-
-    def test_migrate_both_to_providers(self) -> None:
-        """deepseek: 和 anthropic: 同时迁移。"""
-        yaml_data: dict[str, Any] = {
-            "deepseek": {"api_key": "sk-ds", "model": "ds-model"},
-            "anthropic": {"api_key": "sk-ant", "model": "ant-model"},
-        }
-        result = _migrate_legacy_config(yaml_data)
-        assert "deepseek" in result["providers"]
-        assert "anthropic" in result["providers"]
-
-    def test_no_migrate_when_providers_exists(self) -> None:
-        """已有 providers: 段时不迁移。"""
-        yaml_data: dict[str, Any] = {
-            "providers": {"custom": {"type": "openai"}},
-            "deepseek": {"api_key": "sk-ds"},
-        }
-        result = _migrate_legacy_config(yaml_data)
-        # providers 不变，deepseek 不被迁移
-        assert "custom" in result["providers"]
-        assert "deepseek" not in result["providers"]
-
-    def test_no_migrate_when_no_legacy(self) -> None:
-        """无旧格式时不添加 providers。"""
-        yaml_data: dict[str, Any] = {"security": {"workspace_root": "."}}
-        result = _migrate_legacy_config(yaml_data)
-        assert "providers" not in result
-
-    def test_migrate_deepseek_preserves_temperature(self) -> None:
-        """迁移 deepseek 时保留默认 temperature=1.0。"""
-        yaml_data: dict[str, Any] = {
-            "deepseek": {"api_key": "sk-test"},
-        }
-        result = _migrate_legacy_config(yaml_data)
-        assert result["providers"]["deepseek"]["temperature"] == 1.0
-
-
 class TestMultiProviderConfig:
     """多 Provider 配置加载测试。"""
 
@@ -577,28 +494,10 @@ class TestMultiProviderConfig:
             encoding="utf-8",
         )
         config = load_config(config_path=str(yaml_file))
-        assert len(config.providers) == 2
+        assert "openai_provider" in config.providers
+        assert "anthropic_provider" in config.providers
         assert config.providers["openai_provider"].type == "openai"
         assert config.providers["anthropic_provider"].type == "anthropic"
-
-    def test_backward_compat_legacy_yaml(
-        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """旧格式 YAML 自动迁移并正常加载。"""
-        _clear_codepilot_env(monkeypatch)
-        yaml_file = tmp_path / ".codepilot.yml"
-        yaml_file.write_text(
-            "provider: deepseek\n"
-            "deepseek:\n"
-            "  api_key: sk-legacy\n"
-            "  model: legacy-model\n",
-            encoding="utf-8",
-        )
-        config = load_config(config_path=str(yaml_file))
-        # 应迁移到 providers 格式
-        assert "deepseek" in config.providers
-        assert config.providers["deepseek"].type == "openai"
-        assert config.providers["deepseek"].model == "legacy-model"
 
     def test_validate_provider_in_providers_dict(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
@@ -628,8 +527,8 @@ class TestMultiProviderConfig:
         _mock_no_yaml(monkeypatch)
         monkeypatch.setenv("CODEPILOT_API_KEY", "sk-convenience")
         config = load_config()
-        # 默认 provider 为 deepseek，旧格式下应覆盖
-        assert config.deepseek.api_key.get_secret_value() == "sk-convenience"
+        # 默认 provider 为 xunfei，CODEPILOT_API_KEY 应覆盖
+        assert config.providers["xunfei"].api_key.get_secret_value() == "sk-convenience"
 
     def test_cli_provider_switch(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch

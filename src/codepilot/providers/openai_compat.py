@@ -124,9 +124,7 @@ class OpenAICompatProvider(BaseProvider):
                     error=str(e),
                 )
                 kwargs_fallback = {
-                    k: v
-                    for k, v in kwargs.items()
-                    if k != "stream_options"
+                    k: v for k, v in kwargs.items() if k != "stream_options"
                 }
                 try:
                     response = await self._create_completion(**kwargs_fallback)

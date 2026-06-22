@@ -380,7 +380,11 @@ class DisplayManager:
         """
         self._stop_live()
         # 非 TTY 模式下延迟打印 token usage
-        if not self._is_tty and self.config.show_token_usage and self._cumulative_input + self._cumulative_output > 0:
+        if (
+            not self._is_tty
+            and self.config.show_token_usage
+            and self._cumulative_input + self._cumulative_output > 0
+        ):
             self._print_usage_panel()
 
     # ------------------------------------------------------------------
@@ -506,23 +510,14 @@ class DisplayManager:
 
         content.append(Text("Provider:\n", style="bold yellow"))
         content.append(Text(f"  provider: {config.provider}\n"))
-        if config.provider == "anthropic":
-            api_key = config.anthropic.api_key.get_secret_value()
-            content.append(Text(f"  model:    {config.anthropic.model}\n"))
-            content.append(Text(f"  base_url: {config.anthropic.base_url}\n"))
-            content.append(Text(f"  api_key:  {_mask_api_key(api_key)}\n"))
-            content.append(Text(f"  max_tokens: {config.anthropic.max_tokens}\n"))
-            content.append(Text(f"  temperature: {config.anthropic.temperature}\n"))
-        else:
-            api_key = config.deepseek.api_key.get_secret_value()
-            content.append(Text(f"  model:    {config.deepseek.model}\n"))
-            content.append(Text(f"  base_url: {config.deepseek.base_url}\n"))
-            content.append(Text(f"  api_key:  {_mask_api_key(api_key)}\n"))
-            content.append(Text(f"  max_tokens: {config.deepseek.max_tokens}\n"))
-            content.append(Text(f"  temperature: {config.deepseek.temperature}\n"))
-            content.append(
-                Text(f"  thinking: enabled={config.deepseek.thinking.enabled}\n")
-            )
+        prov_cfg = config.providers[config.provider]
+        api_key = prov_cfg.api_key.get_secret_value()
+        content.append(Text(f"  model:    {prov_cfg.model}\n"))
+        content.append(Text(f"  base_url: {prov_cfg.base_url}\n"))
+        content.append(Text(f"  api_key:  {_mask_api_key(api_key)}\n"))
+        content.append(Text(f"  max_tokens: {prov_cfg.max_tokens}\n"))
+        content.append(Text(f"  temperature: {prov_cfg.temperature}\n"))
+        content.append(Text(f"  thinking: enabled={prov_cfg.thinking.enabled}\n"))
         content.append(Text("\n"))
 
         content.append(Text("Security:\n", style="bold yellow"))

@@ -8,9 +8,6 @@ linter 未安装、常见问题检查。
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from codepilot.tools.diagnose import DiagnoseTool
 

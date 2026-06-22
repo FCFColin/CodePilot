@@ -16,9 +16,8 @@ from pydantic import SecretStr
 
 from codepilot.app import App
 from codepilot.config import (
-    AnthropicConfig,
     Config,
-    DeepSeekConfig,
+    ProviderConfig,
     SecurityConfig,
 )
 
@@ -56,8 +55,19 @@ def _make_config(tmp_path: Path) -> Config:
     _clear_codepilot_env()
     return Config(
         provider="deepseek",
-        deepseek=DeepSeekConfig(api_key=SecretStr("sk-test-deepseek")),
-        anthropic=AnthropicConfig(api_key=SecretStr("sk-test-anthropic")),
+        providers={
+            "deepseek": ProviderConfig(
+                type="openai",
+                api_key=SecretStr("sk-test-deepseek"),
+                base_url="https://api.deepseek.com",
+                model="deepseek-reasoner",
+            ),
+            "anthropic": ProviderConfig(
+                type="anthropic",
+                api_key=SecretStr("sk-test-anthropic"),
+                model="claude-3",
+            ),
+        },
         security=SecurityConfig(
             workspace_root=str(tmp_path),
             blocked_paths=[],

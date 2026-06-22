@@ -19,7 +19,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 
 from codepilot.agent.loop import DEFAULT_SYSTEM_PROMPT, AgentLoop
-from codepilot.config import AnthropicConfig, Config, ProviderConfig
+from codepilot.config import Config
 from codepilot.context.compressor import CompressionStrategy, ContextCompressor
 from codepilot.context.manager import ContextManager
 from codepilot.context.token_counter import TokenCounter
@@ -62,12 +62,23 @@ class UndoTracker:
 
     包装 WriteFileTool 和 EditFileTool 的 execute 方法，
     在执行前记录文件原内容，支持 /undo 命令恢复。
+    支持按轮次回退文件变更（/rollback 命令）。
     """
 
     def __init__(self) -> None:
         # 操作栈：[(abs_path, old_content_or_None), ...]
         # old_content 为 None 表示文件原本不存在（新建）
         self._stack: list[tuple[str, str | None]] = []
+        # 轮次边界：_turn_boundaries[i] 表示第 i 轮开始时 _stack 的长度
+        # 即 _stack[:_turn_boundaries[i]] 的操作属于第 i 轮之前
+        self._turn_boundaries: list[int] = []
+
+    def mark_turn_start(self) -> None:
+        """标记新一轮开始，记录当前栈长度作为轮次边界。
+
+        在每次 agent_loop.run() 之前调用。
+        """
+        self._turn_boundaries.append(len(self._stack))
 
     def undo(self) -> tuple[bool, str]:
         """撤销最近一次文件操作。
@@ -95,6 +106,54 @@ class UndoTracker:
                 return True, f"已恢复文件: {abs_path}"
         except OSError as e:
             return False, f"撤销失败: {e}"
+
+    def undo_to_turn(self, target_turn: int) -> tuple[int, int]:
+        """撤销从目标轮次之后的所有文件操作。
+
+        Args:
+            target_turn: 目标轮次号（1-based），保留该轮次及之前的操作。
+
+        Returns:
+            (undone_count, failed_count) 元组。
+        """
+        if not self._turn_boundaries:
+            return 0, 0
+
+        # target_turn 是 1-based，_turn_boundaries 索引是 0-based
+        # _turn_boundaries[i] = 第 i+1 轮开始时的栈长度
+        # 保留到第 target_turn 轮 = 保留到第 target_turn+1 轮开始时的栈长度
+        if target_turn < 1 or target_turn > len(self._turn_boundaries):
+            return 0, 0
+
+        # 如果 target_turn == len(_turn_boundaries)，说明是最后一轮，保留全部
+        if target_turn < len(self._turn_boundaries):
+            keep_length = self._turn_boundaries[target_turn]
+        else:
+            keep_length = len(self._stack)
+
+        # 从栈末尾开始撤销，直到栈长度等于 keep_length
+        undone_count = 0
+        failed_count = 0
+        while len(self._stack) > keep_length:
+            abs_path, old_content = self._stack.pop()
+            try:
+                if old_content is None:
+                    if os.path.isfile(abs_path):
+                        os.remove(abs_path)
+                else:
+                    parent = os.path.dirname(abs_path)
+                    if parent and not os.path.isdir(parent):
+                        os.makedirs(parent, exist_ok=True)
+                    with open(abs_path, "w", encoding="utf-8") as f:
+                        f.write(old_content)
+                undone_count += 1
+            except OSError:
+                failed_count += 1
+
+        # 截断轮次边界：只保留到 target_turn
+        self._turn_boundaries = self._turn_boundaries[:target_turn]
+
+        return undone_count, failed_count
 
     def _read_file(self, abs_path: str) -> str | None:
         """读取文件内容，不存在返回 None。
@@ -285,12 +344,7 @@ class App:
         # 10. 创建 SessionManager（会话持久化）
         self.session_storage = SessionStorage()
         # 获取当前模型名
-        if config.providers and config.provider in config.providers:
-            current_model = config.providers[config.provider].model
-        elif config.provider == "anthropic":
-            current_model = config.anthropic.model
-        else:
-            current_model = config.deepseek.model
+        current_model = config.providers[config.provider].model
         self.session_manager = SessionManager(
             storage=self.session_storage,
             provider=config.provider,
@@ -326,40 +380,19 @@ class App:
     def _create_provider(config: Config) -> BaseProvider:
         """根据 config.provider 创建对应的 provider 实例。
 
-        优先使用 providers 字典（新格式），回退到 deepseek/anthropic 字段（旧格式）。
+        从 providers 字典中获取当前 provider 的配置并创建实例。
         """
-        # 新格式：providers 字典
-        if config.providers and config.provider in config.providers:
-            prov_config = config.providers[config.provider]
-            if prov_config.type == "anthropic":
-                # 从 ProviderConfig 转换为 AnthropicConfig
-                anthropic_config = AnthropicConfig(
-                    api_key=prov_config.api_key,
-                    base_url=prov_config.base_url,
-                    model=prov_config.model,
-                    max_tokens=prov_config.max_tokens,
-                    temperature=prov_config.temperature,
-                )
-                return AnthropicProvider(anthropic_config)
-            # 默认 type == "openai"
-            return OpenAICompatProvider(prov_config)
-
-        # 旧格式：deepseek/anthropic 字段
-        if config.provider == "anthropic":
-            return AnthropicProvider(config.anthropic)
-        return OpenAICompatProvider(
-            ProviderConfig(
-                type="openai",
-                api_key=config.deepseek.api_key,
-                base_url=config.deepseek.base_url,
-                model=config.deepseek.model,
-                max_tokens=config.deepseek.max_tokens,
-                temperature=config.deepseek.temperature,
-                top_p=config.deepseek.top_p,
-                stream=config.deepseek.stream,
-                thinking=config.deepseek.thinking,
+        if config.provider not in config.providers:
+            raise CodePilotError(
+                f"未知的 provider: {config.provider}，"
+                f"可选值: {', '.join(config.providers.keys())}"
             )
-        )
+
+        prov_config = config.providers[config.provider]
+        if prov_config.type == "anthropic":
+            return AnthropicProvider(prov_config)
+        # 默认 type == "openai"
+        return OpenAICompatProvider(prov_config)
 
     def _create_tool_registry(self, config: Config) -> ToolRegistry:
         """创建工具注册表，对文件操作工具添加撤销追踪与 Git 自动提交。
@@ -536,6 +569,7 @@ class App:
 
             # Agent 循环
             try:
+                self.undo_tracker.mark_turn_start()
                 await self.agent_loop.run(user_input)
             except KeyboardInterrupt:
                 # Ctrl+C 中断 agent 循环
@@ -551,6 +585,7 @@ class App:
             prompt: 用户提示词。
         """
         try:
+            self.undo_tracker.mark_turn_start()
             await self.agent_loop.run(prompt)
         except KeyboardInterrupt:
             self.agent_loop.cancel()
@@ -665,27 +700,17 @@ class App:
         display = self.display
         if not arg:
             # 显示当前模型
-            if self.config.providers and self.config.provider in self.config.providers:
-                current = self.config.providers[self.config.provider].model
-            elif self.config.provider == "anthropic":
-                current = self.config.anthropic.model
-            else:
-                current = self.config.deepseek.model
+            current = self.config.providers[self.config.provider].model
             display.console.print(f"[cyan]当前模型: {current}[/cyan]")
             display.console.print("[dim]用法: /model <model_name>[/dim]")
             return False
         # 切换模型
-        if self.config.providers and self.config.provider in self.config.providers:
-            new_prov = self.config.providers[self.config.provider].model_copy(
-                update={"model": arg}
-            )
-            new_providers = dict(self.config.providers)
-            new_providers[self.config.provider] = new_prov
-            self.config.providers = new_providers
-        elif self.config.provider == "anthropic":
-            self.config.anthropic.model = arg
-        else:
-            self.config.deepseek.model = arg
+        new_prov = self.config.providers[self.config.provider].model_copy(
+            update={"model": arg}
+        )
+        new_providers = dict(self.config.providers)
+        new_providers[self.config.provider] = new_prov
+        self.config.providers = new_providers
         # 重新创建 provider 和 agent_loop
         self._recreate_provider_and_loop()
         display.console.print(f"[green]已切换模型到: {arg}[/green]")
@@ -696,28 +721,16 @@ class App:
         display = self.display
         if not arg:
             display.console.print(f"[cyan]当前 provider: {self.config.provider}[/cyan]")
-            if self.config.providers:
-                available = ", ".join(self.config.providers.keys())
-                display.console.print(f"[dim]可用: {available}[/dim]")
-            else:
-                display.console.print("[dim]用法: /provider <deepseek|anthropic>[/dim]")
+            available = ", ".join(self.config.providers.keys())
+            display.console.print(f"[dim]可用: {available}[/dim]")
             return False
         # 验证 provider 名称
-        if self.config.providers:
-            if arg not in self.config.providers:
-                available = ", ".join(self.config.providers.keys())
-                display.console.print(
-                    f"[bold red]不支持的 provider: {arg}"
-                    f"（可用: {available}）[/bold red]"
-                )
-                return False
-        else:
-            if arg not in ("deepseek", "anthropic"):
-                display.console.print(
-                    f"[bold red]不支持的 provider: {arg}"
-                    f"（可选: deepseek / anthropic）[/bold red]"
-                )
-                return False
+        if arg not in self.config.providers:
+            available = ", ".join(self.config.providers.keys())
+            display.console.print(
+                f"[bold red]不支持的 provider: {arg}（可用: {available}）[/bold red]"
+            )
+            return False
         self.config.provider = arg
         self._recreate_provider_and_loop()
         # 更新 DisplayManager 的 provider_name
@@ -746,7 +759,7 @@ class App:
     def _handle_rollback_command(self, arg: str) -> bool:
         """处理 /rollback 命令，回退到指定轮次。
 
-        删除目标轮次之后的所有对话消息，不撤销文件变更。
+        删除目标轮次之后的所有对话消息，并撤销对应的文件变更。
 
         Args:
             arg: 目标轮次号。
@@ -757,9 +770,7 @@ class App:
         display = self.display
         if not arg:
             display.console.print("[yellow]用法: /rollback <轮次号>[/yellow]")
-            display.console.print(
-                "回退到指定轮次，删除该轮次之后的所有对话和文件变更"
-            )
+            display.console.print("回退到指定轮次，删除该轮次之后的所有对话和文件变更")
             return False
 
         try:
@@ -773,19 +784,25 @@ class App:
         total_turns = len([m for m in messages if m.role == "user"])
 
         if target_turn < 1 or target_turn > total_turns:
-            display.console.print(
-                f"[red]轮次号超出范围 (1-{total_turns})[/red]"
-            )
+            display.console.print(f"[red]轮次号超出范围 (1-{total_turns})[/red]")
             return False
 
-        # 保留前 target_turn*2 条消息（user+assistant 对）
+        # 1. 撤销文件变更
+        undone, failed = self.undo_tracker.undo_to_turn(target_turn)
+        file_msg = ""
+        if undone > 0:
+            file_msg = f"，撤销了 {undone} 个文件变更"
+            if failed > 0:
+                file_msg += f"（{failed} 个失败）"
+
+        # 2. 保留前 target_turn*2 条消息（user+assistant 对）
         keep_count = target_turn * 2
         if len(messages) > keep_count:
             removed = messages[keep_count:]
             self.context_manager.messages = messages[:keep_count]
             display.console.print(
                 f"[green]已回退到第 {target_turn} 轮，"
-                f"删除了 {len(removed)} 条消息[/green]"
+                f"删除了 {len(removed)} 条消息{file_msg}[/green]"
             )
         else:
             display.console.print(
@@ -827,31 +844,14 @@ class App:
 
         current_provider = self.config.provider
 
-        if self.config.providers:
-            for name, pcfg in self.config.providers.items():
-                is_active = "→ 当前" if name == current_provider else ""
-                table.add_row(
-                    name,
-                    pcfg.type,
-                    pcfg.base_url or "(默认)",
-                    pcfg.model or "(默认)",
-                    is_active,
-                )
-        else:
-            # 旧格式
+        for name, pcfg in self.config.providers.items():
+            is_active = "→ 当前" if name == current_provider else ""
             table.add_row(
-                "deepseek",
-                "openai",
-                self.config.deepseek.base_url,
-                self.config.deepseek.model,
-                "→ 当前" if current_provider == "deepseek" else "",
-            )
-            table.add_row(
-                "anthropic",
-                "anthropic",
-                self.config.anthropic.base_url,
-                self.config.anthropic.model,
-                "→ 当前" if current_provider == "anthropic" else "",
+                name,
+                pcfg.type,
+                pcfg.base_url or "(默认)",
+                pcfg.model or "(默认)",
+                is_active,
             )
 
         self.display.console.print(table)

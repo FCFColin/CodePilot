@@ -30,10 +30,17 @@ _SLASH_COMMANDS = "/help  /config  /clear  /compact  /stats  /undo  /history  /q
 
 
 def _get_provider_display(config: Config) -> str:
-    """获取 Provider 显示文本，如 "DeepSeek (deepseek-chat)"。"""
-    if config.provider == "anthropic":
-        return f"Anthropic ({config.anthropic.model})"
-    return f"DeepSeek ({config.deepseek.model})"
+    """获取 Provider 显示文本，如 "DeepSeek (deepseek-reasoner)"。"""
+    prov_cfg = config.providers[config.provider]
+    # 常见 provider 名称映射（首字母大写或特殊大小写）
+    _display_names: dict[str, str] = {
+        "xunfei": "Xunfei",
+        "deepseek": "DeepSeek",
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+    }
+    display_name = _display_names.get(config.provider, config.provider.capitalize())
+    return f"{display_name} ({prov_cfg.model})"
 
 
 def _get_security_display(config: Config) -> str:

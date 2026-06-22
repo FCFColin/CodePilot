@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -363,7 +364,15 @@ class AgentLoop:
                 accumulated_text, tool_calls
             )
             await self.context_manager.add_message("assistant", assistant_msg)
-            self._record_session_message("assistant", accumulated_text)
+            if accumulated_text:
+                self._record_session_message("assistant", accumulated_text)
+            elif tool_calls:
+                # LLM 只返回了工具调用没有文本，记录工具调用摘要
+                tool_summary = ", ".join(
+                    f"{tc.name}({', '.join(f'{k}={str(v)[:30]}' for k, v in tc.arguments.items())})"  # noqa: E501
+                    for tc in tool_calls
+                )
+                self._record_session_message("assistant", f"[调用工具: {tool_summary}]")
 
             # 记录 thinking 内容到 session
             if accumulated_thinking and self.session_manager is not None:
@@ -409,6 +418,14 @@ class AgentLoop:
 
                     # 记录工具调用到 session
                     self._record_tool_call(tc.name, tc.arguments, result, duration_ms)
+
+                    # 记录工具调用摘要到 session 对话历史
+                    tool_msg = (
+                        f"[{tc.name}]"
+                        f" {json.dumps(tc.arguments, ensure_ascii=False)[:100]}"
+                        f"\n→ {result[:200]}"
+                    )
+                    self._record_session_message("tool", tool_msg)
 
                     # 循环检测：记录最近工具调用并检查重复模式
                     tool_name = tc.name

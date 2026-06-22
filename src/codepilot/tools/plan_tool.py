@@ -114,6 +114,8 @@ class PlanTool(BaseTool):
             "steps": steps,
         }
 
+        logger.info("plan 创建计划", title=title, step_count=len(steps))
+
         return self._format_plan()
 
     def _update_plan(self, arguments: dict[str, Any]) -> str:
@@ -136,7 +138,10 @@ class PlanTool(BaseTool):
                 break
 
         if not found:
+            logger.warning("plan 更新步骤未找到", step_id=step_id)
             return f"Error: 未找到步骤 '{step_id}'"
+
+        logger.info("plan 更新步骤", step_id=step_id, step_status=step_status)
 
         return self._format_plan()
 

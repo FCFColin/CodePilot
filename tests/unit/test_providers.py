@@ -19,7 +19,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from codepilot.config import AnthropicConfig, DeepSeekConfig, ProviderConfig
+from codepilot.config import ProviderConfig
 from codepilot.exceptions import ProviderError
 from codepilot.providers.anthropic import AnthropicProvider
 from codepilot.providers.base import (
@@ -40,13 +40,8 @@ _DEEPSEEK_URL = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2/chat/completi
 _ANTHROPIC_URL = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic/v1/messages"
 
 
-def _deepseek_config() -> DeepSeekConfig:
-    """构造测试用 DeepSeek 配置。"""
-    return DeepSeekConfig(api_key=SecretStr("sk-test-deepseek"))
-
-
-def _provider_config() -> ProviderConfig:
-    """构造测试用 OpenAI 兼容 ProviderConfig。"""
+def _deepseek_config() -> ProviderConfig:
+    """构造测试用 DeepSeek（OpenAI 兼容）ProviderConfig。"""
     return ProviderConfig(
         type="openai",
         api_key=SecretStr("sk-test-deepseek"),
@@ -57,9 +52,19 @@ def _provider_config() -> ProviderConfig:
     )
 
 
-def _anthropic_config() -> AnthropicConfig:
-    """构造测试用 Anthropic 配置。"""
-    return AnthropicConfig(api_key=SecretStr("sk-test-anthropic"))
+def _provider_config() -> ProviderConfig:
+    """构造测试用 OpenAI 兼容 ProviderConfig。"""
+    return _deepseek_config()
+
+
+def _anthropic_config() -> ProviderConfig:
+    """构造测试用 Anthropic ProviderConfig。"""
+    return ProviderConfig(
+        type="anthropic",
+        api_key=SecretStr("sk-test-anthropic"),
+        base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic",
+        model="claude-3",
+    )
 
 
 def _openai_sse(chunks: list[dict[str, Any]]) -> bytes:

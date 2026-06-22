@@ -67,15 +67,15 @@ class SessionExporter:
                 name = tc.get("tool_name", "")
                 duration = tc.get("duration_ms", 0)
                 ts = tc.get("timestamp", "")
-                # 参数摘要：截断到 60 字符
+                # 参数摘要：截断到 200 字符
                 args = tc.get("arguments", {})
                 args_str = json.dumps(args, ensure_ascii=False) if args else ""
-                if len(args_str) > 60:
-                    args_str = args_str[:57] + "..."
-                # 结果摘要：截断到 60 字符
+                if len(args_str) > 200:
+                    args_str = args_str[:197] + "..."
+                # 结果摘要：截断到 200 字符
                 result_str = tc.get("result", "")
-                if len(result_str) > 60:
-                    result_str = result_str[:57] + "..."
+                if len(result_str) > 200:
+                    result_str = result_str[:197] + "..."
                 lines.append(
                     f"| {i} | {name} | {args_str} | {result_str} | {duration} | {ts} |"
                 )
@@ -103,7 +103,16 @@ class SessionExporter:
                 lines.append("")
                 lines.append("</details>")
                 lines.append("")
-            lines.append(str(content))
+            # assistant 消息为空但有 thinking 时，显示思考提示
+            if role == "assistant" and not content and msg.get("thinking"):
+                lines.append("[思考中...]")
+            elif role == "tool":
+                # tool 角色消息用代码块显示
+                lines.append("```")
+                lines.append(str(content))
+                lines.append("```")
+            else:
+                lines.append(str(content))
             lines.append("")
 
         return "\n".join(lines)

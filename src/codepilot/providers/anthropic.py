@@ -25,7 +25,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from codepilot.config import AnthropicConfig
+from codepilot.config import ProviderConfig
 from codepilot.exceptions import ProviderError
 from codepilot.providers.base import (
     AgentEvent,
@@ -49,7 +49,7 @@ logger = structlog.get_logger(__name__)
 class AnthropicProvider(BaseProvider):
     """Anthropic Provider，基于 anthropic SDK 原生 Messages API。"""
 
-    def __init__(self, config: AnthropicConfig) -> None:
+    def __init__(self, config: ProviderConfig) -> None:
         self.config = config
         # 创建异步 Anthropic 客户端
         # max_retries=0 禁用 SDK 内置重试，由 tenacity 统一管理重试

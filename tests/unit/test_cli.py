@@ -14,7 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from codepilot.cli import main, parse_args
-from codepilot.config import Config, DeepSeekConfig
+from codepilot.config import Config, ProviderConfig
 from codepilot.exceptions import CodePilotError, ConfigError
 
 # ============================================================================
@@ -25,7 +25,15 @@ from codepilot.exceptions import CodePilotError, ConfigError
 def _make_mock_config() -> Config:
     """构造测试用 Config（带 dummy API Key）。"""
     return Config(
-        deepseek=DeepSeekConfig(api_key=SecretStr("sk-test-dummy")),
+        provider="deepseek",
+        providers={
+            "deepseek": ProviderConfig(
+                type="openai",
+                api_key=SecretStr("sk-test-dummy"),
+                base_url="https://api.deepseek.com",
+                model="deepseek-reasoner",
+            ),
+        },
     )
 
 

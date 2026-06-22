@@ -28,9 +28,6 @@ logger = structlog.get_logger(__name__)
 # 环境变量引用正则：匹配 ${VAR_NAME} 形式
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-# 有效的 provider 值
-_VALID_PROVIDERS = ("deepseek", "anthropic")
-
 
 # ============================================================================
 # 配置模型定义
@@ -56,29 +53,6 @@ class ProviderConfig(BaseModel):
     top_p: float = 1.0
     stream: bool = True
     thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
-
-
-class DeepSeekConfig(BaseModel):
-    """DeepSeek Provider 配置（OpenAI 兼容端点）。"""
-
-    api_key: SecretStr = SecretStr("")
-    base_url: str = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
-    model: str = "astron-code-latest"
-    max_tokens: int = 8192
-    temperature: float = 1.0
-    top_p: float = 1.0
-    stream: bool = True
-    thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
-
-
-class AnthropicConfig(BaseModel):
-    """Anthropic Provider 配置（Anthropic 兼容端点）。"""
-
-    api_key: SecretStr = SecretStr("")
-    base_url: str = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
-    model: str = "astron-code-latest"
-    max_tokens: int = 8192
-    temperature: float = 0.7
 
 
 class SecurityConfig(BaseModel):
@@ -196,13 +170,28 @@ class RepoMapConfig(BaseModel):
     languages: list[str] = Field(default_factory=lambda: ["python"])
 
 
+# 内置默认 providers
+_DEFAULT_PROVIDERS: dict[str, ProviderConfig] = {
+    "xunfei": ProviderConfig(
+        type="openai",
+        base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+        model="astron-code-latest",
+        temperature=1.0,
+    ),
+    "deepseek": ProviderConfig(
+        type="openai",
+        base_url="https://api.deepseek.com",
+        model="deepseek-reasoner",
+    ),
+}
+
+
 class Config(BaseSettings):
     """顶层配置结构。
 
     使用 Pydantic v2 BaseSettings 自动加载环境变量：
     - CODEPILOT_PROVIDER → provider
-    - CODEPILOT_DEEPSEEK__API_KEY → deepseek.api_key（嵌套）
-    - CODEPILOT_ANTHROPIC__API_KEY → anthropic.api_key（嵌套）
+    - CODEPILOT_PROVIDERS__<NAME>__API_KEY → providers.<name>.api_key（嵌套）
     - 其他 CODEPILOT_{SECTION}__{FIELD} 形式的环境变量
 
     注意：CODEPILOT_API_KEY 为便捷变量，需通过 load_config 手动应用。
@@ -215,10 +204,10 @@ class Config(BaseSettings):
         extra="ignore",
     )
 
-    provider: str = "deepseek"
-    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
-    deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
-    anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
+    providers: dict[str, ProviderConfig] = Field(
+        default_factory=lambda: dict(_DEFAULT_PROVIDERS)
+    )
+    provider: str = "xunfei"
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
@@ -231,15 +220,10 @@ class Config(BaseSettings):
     def validate_provider(cls, v: str) -> str:
         """验证 provider 值是否合法。
 
-        如果 providers 非空，provider 必须是 providers 中的键；
-        否则回退到旧逻辑（deepseek/anthropic 二选一）。
+        provider 必须是 providers 字典中的键。
         注意：此验证器在 providers 字段赋值前执行，
-        因此 providers 非空时的完整验证由 _validate_provider_after 改写。
+        因此完整验证由 load_config 中的后置校验完成。
         """
-        if v not in _VALID_PROVIDERS:
-            # 新 provider 名称可能在 providers 字典中，允许通过
-            # 后续在 _validate_provider_after 中做完整校验
-            pass
         return v
 
 
@@ -261,53 +245,6 @@ def _substitute_env_vars(value: Any) -> Any:
     if isinstance(value, list):
         return [_substitute_env_vars(item) for item in value]
     return value
-
-
-def _migrate_legacy_config(yaml_data: dict[str, Any]) -> dict[str, Any]:
-    """将旧格式 deepseek:/anthropic: 配置迁移为 providers: 格式。
-
-    如果 YAML 中有 deepseek: 或 anthropic: 但没有 providers:，
-    自动转换为 providers: 格式，并发出 deprecation 警告。
-
-    Args:
-        yaml_data: 原始 YAML 配置字典。
-
-    Returns:
-        可能包含 providers: 段的配置字典。
-    """
-    if "providers" in yaml_data:
-        return yaml_data
-
-    has_legacy = "deepseek" in yaml_data or "anthropic" in yaml_data
-    if not has_legacy:
-        return yaml_data
-
-    providers: dict[str, Any] = {}
-
-    if "deepseek" in yaml_data:
-        deepseek_data = dict(yaml_data["deepseek"])
-        deepseek_data["type"] = "openai"
-        # 旧 DeepSeekConfig 默认 temperature=1.0，迁移时保留
-        if "temperature" not in deepseek_data:
-            deepseek_data["temperature"] = 1.0
-        providers["deepseek"] = deepseek_data
-        logger.warning(
-            "deepseek: 配置段已弃用，请迁移到 providers: 格式",
-        )
-
-    if "anthropic" in yaml_data:
-        anthropic_data = dict(yaml_data["anthropic"])
-        anthropic_data["type"] = "anthropic"
-        providers["anthropic"] = anthropic_data
-        logger.warning(
-            "anthropic: 配置段已弃用，请迁移到 providers: 格式",
-        )
-
-    if providers:
-        yaml_data = dict(yaml_data)
-        yaml_data["providers"] = providers
-
-    return yaml_data
 
 
 def _load_yaml_config(path: str) -> dict[str, Any]:
@@ -353,7 +290,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 def _is_env_var_set(field_path: list[str]) -> bool:
     """检查给定字段路径对应的环境变量是否已设置。
 
-    field_path 如 ["deepseek", "api_key"] 对应 CODEPILOT_DEEPSEEK__API_KEY。
+    field_path 如 ["providers", "deepseek", "api_key"] 对应
+    CODEPILOT_PROVIDERS__DEEPSEEK__API_KEY。
 
     Args:
         field_path: 字段路径组件列表。
@@ -420,8 +358,6 @@ def _merge_yaml_into_config(config: Config, yaml_data: dict[str, Any]) -> Config
 
     # 嵌套 section
     section_names = [
-        "deepseek",
-        "anthropic",
         "security",
         "context",
         "ui",
@@ -445,7 +381,7 @@ def _merge_yaml_into_config(config: Config, yaml_data: dict[str, Any]) -> Config
         new_section = section_type.model_validate(section_dict)
         updates[section_name] = new_section
 
-    # providers 段（新格式）
+    # providers 段
     if "providers" in yaml_data and isinstance(yaml_data["providers"], dict):
         providers_yaml = yaml_data["providers"]
         providers_updates: dict[str, ProviderConfig] = {}
@@ -489,32 +425,15 @@ def _apply_codepilot_api_key(config: Config) -> Config:
     provider = config.provider
     logger.debug("应用 CODEPILOT_API_KEY", provider=provider)
 
-    updates: dict[str, Any] = {}
-
-    # 新格式：providers 字典
-    if config.providers and provider in config.providers:
-        new_prov = config.providers[provider].model_copy(
-            update={"api_key": SecretStr(api_key)}
-        )
-        new_providers = dict(config.providers)
-        new_providers[provider] = new_prov
-        updates["providers"] = new_providers
-
-    # 旧格式：deepseek/anthropic 字段
-    if provider == "deepseek":
-        new_deepseek = config.deepseek.model_copy(
-            update={"api_key": SecretStr(api_key)}
-        )
-        updates["deepseek"] = new_deepseek
-    elif provider == "anthropic":
-        new_anthropic = config.anthropic.model_copy(
-            update={"api_key": SecretStr(api_key)}
-        )
-        updates["anthropic"] = new_anthropic
-
-    if not updates:
+    if provider not in config.providers:
         return config
-    return config.model_copy(update=updates)
+
+    new_prov = config.providers[provider].model_copy(
+        update={"api_key": SecretStr(api_key)}
+    )
+    new_providers = dict(config.providers)
+    new_providers[provider] = new_prov
+    return config.model_copy(update={"providers": new_providers})
 
 
 def _apply_cli_args(config: Config, args: argparse.Namespace) -> Config:
@@ -539,44 +458,22 @@ def _apply_cli_args(config: Config, args: argparse.Namespace) -> Config:
     current_provider = updates.get("provider", config.provider)
 
     model = getattr(args, "model", None)
-    if model:
-        # 新格式：更新 providers 中的活跃 provider
-        if config.providers and current_provider in config.providers:
-            new_prov = config.providers[current_provider].model_copy(
-                update={"model": model}
-            )
-            new_providers = dict(config.providers)
-            new_providers[current_provider] = new_prov
-            updates["providers"] = new_providers
-        # 旧格式
-        if current_provider == "anthropic":
-            new_anthropic = config.anthropic.model_copy(update={"model": model})
-            updates["anthropic"] = new_anthropic
-        else:
-            new_deepseek = config.deepseek.model_copy(update={"model": model})
-            updates["deepseek"] = new_deepseek
+    if model and current_provider in config.providers:
+        new_prov = config.providers[current_provider].model_copy(
+            update={"model": model}
+        )
+        new_providers = dict(config.providers)
+        new_providers[current_provider] = new_prov
+        updates["providers"] = new_providers
 
     api_key = getattr(args, "api_key", None)
-    if api_key:
-        # 新格式：更新 providers 中的活跃 provider
-        if config.providers and current_provider in config.providers:
-            new_prov = config.providers[current_provider].model_copy(
-                update={"api_key": SecretStr(api_key)}
-            )
-            new_providers = dict(config.providers)
-            new_providers[current_provider] = new_prov
-            updates["providers"] = new_providers
-        # 旧格式
-        if current_provider == "anthropic":
-            new_anthropic = config.anthropic.model_copy(
-                update={"api_key": SecretStr(api_key)}
-            )
-            updates["anthropic"] = new_anthropic
-        else:
-            new_deepseek = config.deepseek.model_copy(
-                update={"api_key": SecretStr(api_key)}
-            )
-            updates["deepseek"] = new_deepseek
+    if api_key and current_provider in config.providers:
+        new_prov = config.providers[current_provider].model_copy(
+            update={"api_key": SecretStr(api_key)}
+        )
+        new_providers = dict(config.providers)
+        new_providers[current_provider] = new_prov
+        updates["providers"] = new_providers
 
     workspace = getattr(args, "workspace", None)
     if workspace:
@@ -663,8 +560,7 @@ def load_config(
 
     优先级从高到低：
       1. 命令行参数（args.provider/model/api_key/workspace/no_approve）
-      2. 环境变量（CODEPILOT_API_KEY, CODEPILOT_PROVIDER,
-         CODEPILOT_DEEPSEEK__*, CODEPILOT_ANTHROPIC__* 等）
+      2. 环境变量（CODEPILOT_API_KEY, CODEPILOT_PROVIDER 等）
       3. YAML 配置文件（--config > .codepilot.yml > ~/.config/codepilot/config.yml）
       4. 程序内置默认值
 
@@ -685,9 +581,6 @@ def load_config(
     if yaml_data:
         logger.debug("已加载 YAML 配置")
 
-    # 1.5 迁移旧格式配置
-    yaml_data = _migrate_legacy_config(yaml_data)
-
     # 2. 创建 Config() - BaseSettings 自动加载环境变量
     config = Config()
 
@@ -704,12 +597,8 @@ def load_config(
     # 6. 解析 workspace_root 为绝对路径
     config = _resolve_workspace_root(config)
 
-    # 6.5 验证 provider 名称（providers 非空时必须在字典中）
-    if (
-        config.providers
-        and config.provider not in config.providers
-        and config.provider not in _VALID_PROVIDERS
-    ):
+    # 6.5 验证 provider 名称（必须在 providers 字典中）
+    if config.provider not in config.providers:
         raise ConfigError(
             f"无效的 provider: {config.provider}，"
             f"可选值: {', '.join(config.providers.keys())}"
@@ -735,24 +624,10 @@ def validate_config(config: Config) -> None:
     """
     provider = config.provider
 
-    # 新格式：providers 字典
-    if config.providers and provider in config.providers:
-        api_key = config.providers[provider].api_key.get_secret_value()
-        if not api_key:
-            raise ConfigError(
-                f"Provider '{provider}' 缺少 API Key，"
-                f"请设置 CODEPILOT_API_KEY 环境变量或在配置文件中配置"
-            )
-        return
-
-    # 旧格式：deepseek/anthropic 字段
-    if provider == "deepseek":
-        api_key = config.deepseek.api_key.get_secret_value()
-    elif provider == "anthropic":
-        api_key = config.anthropic.api_key.get_secret_value()
-    else:
+    if provider not in config.providers:
         raise ConfigError(f"未知的 provider: {provider}")
 
+    api_key = config.providers[provider].api_key.get_secret_value()
     if not api_key:
         raise ConfigError(
             f"Provider '{provider}' 缺少 API Key，"

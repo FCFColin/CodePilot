@@ -19,9 +19,7 @@ from pydantic import SecretStr
 
 from codepilot.app import App, TrackedToolWrapper, UndoTracker, create_app
 from codepilot.config import (
-    AnthropicConfig,
     Config,
-    DeepSeekConfig,
     ProviderConfig,
     SecurityConfig,
 )
@@ -44,14 +42,31 @@ def _clear_codepilot_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _make_config(
     tmp_path: Path,
-    provider: str = "deepseek",
+    provider: str = "xunfei",
 ) -> Config:
     """构造测试用 Config，workspace_root 指向 tmp_path。"""
     _clear_codepilot_env(pytest.MonkeyPatch())
     return Config(
         provider=provider,
-        deepseek=DeepSeekConfig(api_key=SecretStr("sk-test-deepseek")),
-        anthropic=AnthropicConfig(api_key=SecretStr("sk-test-anthropic")),
+        providers={
+            "xunfei": ProviderConfig(
+                api_key=SecretStr("sk-test-xunfei"),
+                base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+                model="astron-code-latest",
+                temperature=1.0,
+            ),
+            "deepseek": ProviderConfig(
+                api_key=SecretStr("sk-test-deepseek"),
+                base_url="https://api.deepseek.com",
+                model="deepseek-reasoner",
+            ),
+            "anthropic": ProviderConfig(
+                type="anthropic",
+                api_key=SecretStr("sk-test-anthropic"),
+                base_url="https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic",
+                model="astron-code-latest",
+            ),
+        },
         security=SecurityConfig(
             workspace_root=str(tmp_path),
             blocked_paths=[],
@@ -91,9 +106,9 @@ class _MockTool(BaseTool):
 class TestApp:
     """App 组件组装与 slash 命令测试。"""
 
-    def test_app_creates_deepseek_provider(self, tmp_path: Path) -> None:
-        """App 使用 deepseek provider 时创建 OpenAICompatProvider。"""
-        config = _make_config(tmp_path, provider="deepseek")
+    def test_app_creates_xunfei_provider(self, tmp_path: Path) -> None:
+        """App 使用 xunfei provider 时创建 OpenAICompatProvider。"""
+        config = _make_config(tmp_path, provider="xunfei")
         app = App(config)
         assert isinstance(app.provider, OpenAICompatProvider)
 
@@ -221,11 +236,11 @@ class TestApp:
         """/model 带参数时切换模型并返回 False。"""
         config = _make_config(tmp_path)
         app = App(config)
-        original_model = config.deepseek.model
+        original_model = config.providers["xunfei"].model
         result = await app._handle_slash_command("/model new-model-name")
         assert result is False
-        assert config.deepseek.model == "new-model-name"
-        assert config.deepseek.model != original_model
+        assert config.providers["xunfei"].model == "new-model-name"
+        assert config.providers["xunfei"].model != original_model
 
     async def test_slash_model_with_arg_anthropic(self, tmp_path: Path) -> None:
         """/model 带参数时切换 anthropic 模型。"""
@@ -233,7 +248,7 @@ class TestApp:
         app = App(config)
         result = await app._handle_slash_command("/model claude-3-opus")
         assert result is False
-        assert config.anthropic.model == "claude-3-opus"
+        assert config.providers["anthropic"].model == "claude-3-opus"
 
     async def test_slash_provider_no_arg(self, tmp_path: Path) -> None:
         """/provider 无参数时显示当前 provider 并返回 False。"""
@@ -244,20 +259,20 @@ class TestApp:
 
     async def test_slash_provider_with_arg(self, tmp_path: Path) -> None:
         """/provider 带参数时切换 provider 并返回 False。"""
-        config = _make_config(tmp_path, provider="deepseek")
+        config = _make_config(tmp_path, provider="xunfei")
         app = App(config)
-        result = await app._handle_slash_command("/provider anthropic")
+        result = await app._handle_slash_command("/provider deepseek")
         assert result is False
-        assert config.provider == "anthropic"
-        assert app.display.provider_name == "anthropic"
+        assert config.provider == "deepseek"
+        assert app.display.provider_name == "deepseek"
 
     async def test_slash_provider_invalid_arg(self, tmp_path: Path) -> None:
         """/provider 带无效参数时不切换并返回 False。"""
-        config = _make_config(tmp_path, provider="deepseek")
+        config = _make_config(tmp_path, provider="xunfei")
         app = App(config)
         result = await app._handle_slash_command("/provider invalid")
         assert result is False
-        assert config.provider == "deepseek"
+        assert config.provider == "xunfei"
 
     async def test_slash_quit(self, tmp_path: Path) -> None:
         """/quit 命令返回 True 表示应退出。"""
@@ -516,6 +531,91 @@ class TestUndoTracker:
         result = tracker._read_file(str(file_path))
         assert result is None
 
+    def test_mark_turn_start(self) -> None:
+        """mark_turn_start 记录当前栈长度到轮次边界。"""
+        tracker = UndoTracker()
+        assert tracker._turn_boundaries == []
+        tracker.mark_turn_start()  # 第 1 轮开始，栈长度=0
+        assert tracker._turn_boundaries == [0]
+        tracker._stack.append(("file1", None))
+        tracker.mark_turn_start()  # 第 2 轮开始，栈长度=1
+        assert tracker._turn_boundaries == [0, 1]
+        tracker._stack.append(("file2", "old"))
+        tracker.mark_turn_start()  # 第 3 轮开始，栈长度=2
+        assert tracker._turn_boundaries == [0, 1, 2]
+
+    def test_undo_to_turn_basic(self, tmp_path: Path) -> None:
+        """undo_to_turn 撤销目标轮次之后的所有文件操作。"""
+        tracker = UndoTracker()
+        # 第 1 轮
+        tracker.mark_turn_start()
+        file1 = tmp_path / "file1.txt"
+        file1.write_text("new1", encoding="utf-8")
+        tracker._stack.append((str(file1), None))
+        # 第 2 轮
+        tracker.mark_turn_start()
+        file2 = tmp_path / "file2.txt"
+        file2.write_text("new2", encoding="utf-8")
+        tracker._stack.append((str(file2), "old2"))
+        # 第 3 轮
+        tracker.mark_turn_start()
+        file3 = tmp_path / "file3.txt"
+        file3.write_text("new3", encoding="utf-8")
+        tracker._stack.append((str(file3), None))
+
+        # 回退到第 1 轮：撤销第 2、3 轮的文件操作
+        undone, failed = tracker.undo_to_turn(1)
+        assert undone == 2
+        assert failed == 0
+        assert not file3.exists()
+        assert file2.read_text(encoding="utf-8") == "old2"
+        assert file1.exists()  # 第 1 轮的文件保留
+        assert len(tracker._stack) == 1
+        assert tracker._turn_boundaries == [0]
+
+    def test_undo_to_turn_no_boundaries(self) -> None:
+        """undo_to_turn 无轮次边界时返回 (0, 0)。"""
+        tracker = UndoTracker()
+        undone, failed = tracker.undo_to_turn(1)
+        assert undone == 0
+        assert failed == 0
+
+    def test_undo_to_turn_invalid_turn(self) -> None:
+        """undo_to_turn 轮次号超出范围时返回 (0, 0)。"""
+        tracker = UndoTracker()
+        tracker.mark_turn_start()
+        undone, failed = tracker.undo_to_turn(0)  # 太小
+        assert undone == 0
+        undone, failed = tracker.undo_to_turn(2)  # 太大
+        assert undone == 0
+
+    def test_undo_to_turn_os_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """undo_to_turn 遇到 OSError 时计入 failed_count。"""
+        tracker = UndoTracker()
+        tracker.mark_turn_start()
+        file1 = tmp_path / "file1.txt"
+        file1.write_text("new1", encoding="utf-8")
+        tracker._stack.append((str(file1), "old1"))
+        tracker.mark_turn_start()
+        file2 = tmp_path / "file2.txt"
+        file2.write_text("new2", encoding="utf-8")
+        tracker._stack.append((str(file2), "old2"))
+
+        original_open = builtins.open
+
+        def _mock_open(*args: Any, **kwargs: Any) -> Any:
+            if len(args) > 0 and isinstance(args[0], str) and "file2.txt" in args[0]:
+                raise OSError("permission denied")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", _mock_open)
+        # 回退到第 1 轮：撤销第 2 轮的 file2（会失败）
+        undone, failed = tracker.undo_to_turn(1)
+        assert undone == 0  # file2 恢复失败
+        assert failed == 1
+
 
 # ============================================================================
 # TestTrackedToolWrapper
@@ -699,8 +799,6 @@ class TestSessionIntegration:
         app.session_manager.add_message("user", "test")
 
         # Mock Path.write_text to raise OSError
-        original_write_text = Path.write_text
-
         def _mock_write_text(self_path: Any, *args: Any, **kwargs: Any) -> Any:
             raise OSError("disk full")
 
@@ -943,17 +1041,17 @@ class TestSessionManagerCreation:
         assert app.session_storage is not None
         assert app.session_exporter is not None
 
-    def test_session_manager_model_deepseek(self, tmp_path: Path) -> None:
-        """deepseek provider 时 session_manager 使用 deepseek model。"""
-        config = _make_config(tmp_path, provider="deepseek")
+    def test_session_manager_model_xunfei(self, tmp_path: Path) -> None:
+        """xunfei provider 时 session_manager 使用 xunfei model。"""
+        config = _make_config(tmp_path, provider="xunfei")
         app = App(config)
-        assert app.session_manager.model == config.deepseek.model
+        assert app.session_manager.model == config.providers["xunfei"].model
 
     def test_session_manager_model_anthropic(self, tmp_path: Path) -> None:
         """anthropic provider 时 session_manager 使用 anthropic model。"""
         config = _make_config(tmp_path, provider="anthropic")
         app = App(config)
-        assert app.session_manager.model == config.anthropic.model
+        assert app.session_manager.model == config.providers["anthropic"].model
 
 
 # ============================================================================
@@ -1146,37 +1244,9 @@ class TestRollbackPlanProviders:
         # 清理
         PlanTool.clear_plan()
 
-    async def test_slash_providers_legacy_format(self, tmp_path: Path) -> None:
-        """/providers 旧格式（无 providers 字典）时显示 deepseek 和 anthropic。"""
-        config = _make_config(tmp_path, provider="deepseek")
-        app = App(config)
-        result = await app._handle_slash_command("/providers")
-        assert result is False
-
-    async def test_slash_providers_new_format(self, tmp_path: Path) -> None:
-        """/providers 新格式（有 providers 字典）时显示所有 provider。"""
-        _clear_codepilot_env(pytest.MonkeyPatch())
-        config = Config(
-            provider="provider_a",
-            providers={
-                "provider_a": ProviderConfig(
-                    type="openai",
-                    api_key=SecretStr("sk-test-a"),
-                    base_url="https://a.example.com/v1",
-                    model="model-a",
-                ),
-                "provider_b": ProviderConfig(
-                    type="anthropic",
-                    api_key=SecretStr("sk-test-b"),
-                    base_url="https://b.example.com",
-                    model="model-b",
-                ),
-            },
-            security=SecurityConfig(
-                workspace_root=str(tmp_path),
-                blocked_paths=[],
-            ),
-        )
+    async def test_slash_providers(self, tmp_path: Path) -> None:
+        """/providers 显示所有已配置的 provider。"""
+        config = _make_config(tmp_path)
         app = App(config)
         result = await app._handle_slash_command("/providers")
         assert result is False

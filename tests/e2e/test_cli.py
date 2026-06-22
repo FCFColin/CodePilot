@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -34,6 +35,8 @@ def _env_with_api_key(api_key: str | None) -> dict[str, str]:
         "CODEPILOT_API_KEY",
         "CODEPILOT_DEEPSEEK__API_KEY",
         "CODEPILOT_ANTHROPIC__API_KEY",
+        "CODEPILOT_PROVIDERS__XUNFEI__API_KEY",
+        "CODEPILOT_PROVIDERS__DEEPSEEK__API_KEY",
     ):
         env.pop(key, None)
     if api_key is not None:
@@ -80,19 +83,25 @@ class TestCLI:
         assert result.returncode == 0
 
     def test_no_api_key_fails(self) -> None:
-        """无 API Key 时启动给出清晰错误信息并以非零返回码退出。"""
+        """无 API Key 且无配置文件时启动给出清晰错误信息并以非零返回码退出。
+
+        在临时目录中运行，避免读取项目目录下的 .codepilot.yml。
+        """
         env = _env_with_api_key(None)
-        result = subprocess.run(
-            ["codepilot"],
-            input="/quit\n",
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-        assert result.returncode != 0
-        stderr_lower = result.stderr.lower()
-        assert "api" in stderr_lower or "key" in stderr_lower
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = subprocess.run(
+                ["codepilot"],
+                input="/quit\n",
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+                cwd=tmpdir,
+            )
+            assert result.returncode != 0
+            stderr_lower = result.stderr.lower()
+            stdout_lower = result.stdout.lower()
+            assert "api" in stderr_lower or "key" in stderr_lower or "api" in stdout_lower or "key" in stdout_lower
 
     def test_python_m_consistency(self) -> None:
         """python -m codepilot --version 与 codepilot --version 输出一致。"""

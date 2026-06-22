@@ -14,9 +14,8 @@ from pydantic import SecretStr
 from rich.console import Console
 
 from codepilot.config import (
-    AnthropicConfig,
     Config,
-    DeepSeekConfig,
+    ProviderConfig,
     UIConfig,
 )
 from codepilot.providers.base import Message
@@ -27,7 +26,7 @@ from codepilot.ui.banner import (
     show_banner,
 )
 from codepilot.ui.diff_view import render_diff, render_new_file
-from codepilot.ui.display import DisplayManager
+from codepilot.ui.display import DisplayManager, _format_arguments, _mask_api_key
 
 # ============================================================================
 # 辅助函数
@@ -38,8 +37,19 @@ def _make_config(provider: str = "deepseek") -> Config:
     """构造测试用 Config。"""
     return Config(
         provider=provider,
-        deepseek=DeepSeekConfig(api_key=SecretStr("sk-test-deepseek")),
-        anthropic=AnthropicConfig(api_key=SecretStr("sk-test-anthropic")),
+        providers={
+            "deepseek": ProviderConfig(
+                type="openai",
+                api_key=SecretStr("sk-test-deepseek"),
+                base_url="https://api.deepseek.com",
+                model="deepseek-reasoner",
+            ),
+            "anthropic": ProviderConfig(
+                type="anthropic",
+                api_key=SecretStr("sk-test-anthropic"),
+                model="claude-3",
+            ),
+        },
     )
 
 
@@ -477,14 +487,14 @@ class TestBanner:
         config = _make_config(provider="deepseek")
         result = _get_provider_display(config)
         assert "DeepSeek" in result
-        assert config.deepseek.model in result
+        assert config.providers["deepseek"].model in result
 
     def test_get_provider_display_anthropic(self) -> None:
         """_get_provider_display 返回 Anthropic 显示文本。"""
         config = _make_config(provider="anthropic")
         result = _get_provider_display(config)
         assert "Anthropic" in result
-        assert config.anthropic.model in result
+        assert config.providers["anthropic"].model in result
 
     def test_get_security_display_with_approval(self) -> None:
         """_get_security_display 有审批列表时 Approval ON。"""
@@ -590,3 +600,54 @@ class TestDiffView:
         console.print(panel)
         result = output.getvalue()
         assert "Diff" in result
+
+
+class TestFormatArguments:
+    """_format_arguments 工具参数格式化测试。"""
+
+    def test_empty_args(self) -> None:
+        """空参数返回空字符串。"""
+        assert _format_arguments({}) == ""
+
+    def test_string_arg(self) -> None:
+        """字符串参数正确格式化。"""
+        result = _format_arguments({"path": "main.py"})
+        assert 'path="main.py"' in result
+
+    def test_string_arg_truncated(self) -> None:
+        """长字符串参数截断到 80 字符。"""
+        long_str = "a" * 100
+        result = _format_arguments({"content": long_str})
+        assert "..." in result
+        assert len(result) < 120
+
+    def test_int_arg(self) -> None:
+        """整数参数正确格式化。"""
+        result = _format_arguments({"count": 5})
+        assert "count=5" in result
+
+    def test_none_arg(self) -> None:
+        """None 参数正确格式化。"""
+        result = _format_arguments({"value": None})
+        assert "value=None" in result
+
+    def test_dict_arg(self) -> None:
+        """dict 参数用 JSON 表示。"""
+        result = _format_arguments({"options": {"key": "val"}})
+        assert "options=" in result
+
+
+class TestMaskApiKey:
+    """_mask_api_key API Key 掩码测试。"""
+
+    def test_empty_key(self) -> None:
+        """空 Key 显示 (未设置)。"""
+        assert _mask_api_key("") == "(未设置)"
+
+    def test_short_key(self) -> None:
+        """短 Key 显示 ****。"""
+        assert _mask_api_key("abc") == "****"
+
+    def test_long_key(self) -> None:
+        """长 Key 显示后 4 位。"""
+        assert _mask_api_key("sk-1234567890abcdef") == "***cdef"

@@ -24,7 +24,8 @@ _LINTER_TIMEOUT = 30
 
 
 class DiagnoseTool(BaseTool):
-    """收集项目错误信息，运行 linter 检查代码问题，读取 traceback 文件，检查文件状态。"""
+    """收集项目错误信息，运行 linter 检查代码问题，读取 traceback 文件，
+    检查文件状态。"""
 
     name = "diagnose"
     description = (
@@ -64,6 +65,13 @@ class DiagnoseTool(BaseTool):
         error_desc = arguments.get("error_description", "")
         file_path = arguments.get("file_path", "")
         run_linter = arguments.get("run_linter", True)
+
+        logger.info(
+            "diagnose 开始诊断",
+            error_desc=error_desc[:100],
+            file_path=file_path,
+            run_linter=run_linter,
+        )
 
         sections: list[str] = []
 
@@ -146,18 +154,35 @@ class DiagnoseTool(BaseTool):
 
                 if proc.returncode == 0:
                     lines.append(f"✅ {name}: 无问题")
+                    logger.debug("diagnose linter 通过", linter=name)
                 else:
                     lines.append(f"❌ {name} (exit code {proc.returncode}):")
                     if output:
                         lines.append(output[:2000])
                     if error_output:
                         lines.append(f"stderr: {error_output[:1000]}")
-            except asyncio.TimeoutError:
+                    logger.warning(
+                        "diagnose linter 发现问题",
+                        linter=name,
+                        exit_code=proc.returncode,
+                    )
+            except TimeoutError:
                 lines.append(f"⏰ {name}: 超时")
+                logger.warning(
+                    "diagnose linter 超时",
+                    linter=name,
+                    timeout=_LINTER_TIMEOUT,
+                )
             except FileNotFoundError:
                 lines.append(f"⚠️ {name}: 未安装")
+                logger.debug("diagnose linter 未安装", linter=name)
             except Exception as e:
                 lines.append(f"❌ {name}: 执行失败 - {e}")
+                logger.error(
+                    "diagnose linter 执行失败",
+                    linter=name,
+                    error=str(e)[:200],
+                )
 
         return "\n".join(lines)
 

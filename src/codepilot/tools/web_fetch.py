@@ -65,11 +65,15 @@ class WebFetchTool(BaseTool):
         """
         url = arguments.get("url", "")
         if not url:
+            logger.warning("web_fetch 缺少 url 参数")
             return "Error: 缺少 url 参数"
 
         # URL 格式校验
         if not url.startswith(("http://", "https://")):
+            logger.warning("web_fetch URL 格式无效", url=url[:100])
             return f"Error: URL 必须以 http:// 或 https:// 开头，收到: {url}"
+
+        logger.info("web_fetch 开始抓取", url=url[:200])
 
         try:
             async with httpx.AsyncClient(
@@ -106,18 +110,37 @@ class WebFetchTool(BaseTool):
                 f"Content-Type: {content_type}\n"
                 f"Size: {len(result)} chars\n\n---\n\n"
             )
+
+            logger.info(
+                "web_fetch 抓取完成",
+                url=url[:200],
+                status=status,
+                content_type=content_type,
+                size=len(result),
+            )
+
             return meta + result
 
         except httpx.TimeoutException:
+            logger.warning(
+                "web_fetch 请求超时", url=url[:200], timeout=_REQUEST_TIMEOUT
+            )
             return f"Error: 请求超时（{_REQUEST_TIMEOUT}秒），URL: {url}"
         except httpx.HTTPStatusError as e:
+            logger.warning(
+                "web_fetch HTTP 错误",
+                url=url[:200],
+                status_code=e.response.status_code,
+            )
             return (
                 f"Error: HTTP {e.response.status_code}"
                 f" - {e.response.reason_phrase}, URL: {url}"
             )
         except httpx.InvalidURL:
+            logger.warning("web_fetch 无效 URL", url=url[:100])
             return f"Error: 无效的 URL: {url}"
         except Exception as e:
+            logger.error("web_fetch 抓取失败", url=url[:200], error=str(e)[:200])
             return f"Error: 抓取失败 - {type(e).__name__}: {e}"
 
 
