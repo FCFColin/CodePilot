@@ -181,6 +181,52 @@ def _mock_stream_response(chunks: list[dict[str, Any]]) -> _MockStreamResponse:
     return _MockStreamResponse(chunks)
 
 
+class _MockNonStreamMessage:
+    """模拟非流式响应中的 message 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+        self.content = data.get("content", "")
+        self.tool_calls = data.get("tool_calls")
+        self.role = data.get("role", "assistant")
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name)
+
+
+class _MockNonStreamChoice:
+    """模拟非流式响应中的 choice 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+        self.message = _MockNonStreamMessage(data.get("message", {}))
+        self.finish_reason = data.get("finish_reason")
+
+    def __getattr__(self, name: str) -> Any:
+        return self._data.get(name)
+
+
+class _MockUsage:
+    """模拟 usage 对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.prompt_tokens = data.get("prompt_tokens", 0)
+        self.completion_tokens = data.get("completion_tokens", 0)
+        self.total_tokens = data.get("total_tokens", 0)
+
+
+class _MockNonStreamResponse:
+    """模拟非流式响应对象。"""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+        self.usage = _MockUsage(data.get("usage", {})) if "usage" in data else None
+        raw_choices = data.get("choices", [])
+        self.choices = [_MockNonStreamChoice(c) for c in raw_choices]
+        self.id = data.get("id")
+        self.object = data.get("object")
+
+
 # ============================================================================
 # TestFormatToolResult
 # ============================================================================
@@ -923,3 +969,494 @@ class TestErrorHandling:
             provider = AnthropicProvider(_anthropic_config())
             with pytest.raises(ProviderError, match="Anthropic"):
                 await _collect(provider.chat([Message(role="user", content="hi")]))
+
+
+# ============================================================================
+# TestProviderDifferences：Provider 差异专项测试
+# ============================================================================
+
+
+class TestProviderDifferences:
+    """Provider 差异专项测试。
+
+    覆盖：
+    - OpenAICompatProvider 与 AnthropicProvider 的工具定义格式差异
+    - OpenAICompatProvider 的 stream_options 降级逻辑
+    - AnthropicProvider 的 content-block 架构处理
+    - 两种 Provider 对 ToolCall 的解析差异
+    """
+
+    # ------------------------------------------------------------------
+    # 1. 工具定义格式差异
+    # ------------------------------------------------------------------
+
+    def test_tool_result_format_difference(self) -> None:
+        """OpenAI 工具结果为扁平 tool 消息；Anthropic 为 user 角色 + content blocks。"""
+        openai_provider = OpenAICompatProvider(_provider_config())
+        anthropic_provider = AnthropicProvider(_anthropic_config())
+
+        openai_result = openai_provider.format_tool_result(
+            role="tool", tool_call_id="call_1", content="结果"
+        )
+        anthropic_result = anthropic_provider.format_tool_result(
+            role="user", tool_call_id="toolu_1", content="结果"
+        )
+
+        # OpenAI：扁平结构，role=tool，顶层 tool_call_id
+        assert openai_result["role"] == "tool"
+        assert isinstance(openai_result["content"], str)
+        assert openai_result["tool_call_id"] == "call_1"
+        # 无 content blocks
+        assert not isinstance(openai_result["content"], list)
+
+        # Anthropic：role=user，content 为 content blocks 列表
+        assert anthropic_result["role"] == "user"
+        assert isinstance(anthropic_result["content"], list)
+        block = anthropic_result["content"][0]
+        assert block["type"] == "tool_result"
+        assert block["tool_use_id"] == "toolu_1"
+
+    def test_assistant_message_format_difference(self) -> None:
+        """OpenAI assistant 消息用顶层 tool_calls 列表；Anthropic 用 content blocks。"""
+        openai_provider = OpenAICompatProvider(_provider_config())
+        anthropic_provider = AnthropicProvider(_anthropic_config())
+
+        calls = [ToolCall(id="id_1", name="search", arguments={"q": "test"})]
+
+        openai_msg = openai_provider.format_assistant_message("搜索中", calls)
+        anthropic_msg = anthropic_provider.format_assistant_message("搜索中", calls)
+
+        # OpenAI：content 为字符串，tool_calls 为顶层列表
+        assert isinstance(openai_msg["content"], str)
+        assert openai_msg["content"] == "搜索中"
+        assert "tool_calls" in openai_msg
+        tc = openai_msg["tool_calls"][0]
+        assert tc["type"] == "function"
+        assert tc["function"]["name"] == "search"
+        # arguments 是 JSON 字符串
+        assert isinstance(tc["function"]["arguments"], str)
+        assert json.loads(tc["function"]["arguments"]) == {"q": "test"}
+
+        # Anthropic：content 为 blocks 列表，含 text + tool_use
+        assert isinstance(anthropic_msg["content"], list)
+        assert len(anthropic_msg["content"]) == 2
+        assert anthropic_msg["content"][0]["type"] == "text"
+        assert anthropic_msg["content"][0]["text"] == "搜索中"
+        tool_block = anthropic_msg["content"][1]
+        assert tool_block["type"] == "tool_use"
+        assert tool_block["name"] == "search"
+        # input 是 dict，非 JSON 字符串
+        assert isinstance(tool_block["input"], dict)
+        assert tool_block["input"] == {"q": "test"}
+
+    # ------------------------------------------------------------------
+    # 2. stream_options 降级逻辑
+    # ------------------------------------------------------------------
+
+    async def test_stream_options_removed_on_api_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stream_options 导致 APIError 时，移除后重试成功。"""
+        provider = OpenAICompatProvider(_provider_config())
+
+        chunks = [
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {"index": 0, "delta": {"content": "降级成功"}, "finish_reason": None}
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+
+        call_count = 0
+        captured_kwargs: list[dict[str, Any]] = []
+
+        async def _mock_create_completion(**kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            captured_kwargs.append(dict(kwargs))
+            if call_count == 1:
+                # 第一次带 stream_options，模拟不支持
+                raise openai.APIError(
+                    message="stream_options is not supported",
+                    request=None,
+                    body=None,
+                )
+            # 第二次不带 stream_options，成功
+            return _mock_stream_response(chunks)
+
+        monkeypatch.setattr(provider, "_create_completion", _mock_create_completion)
+
+        events = await _collect(
+            provider.chat([Message(role="user", content="hi")])
+        )
+
+        # 第一次调用应有 stream_options
+        assert "stream_options" in captured_kwargs[0]
+        # 第二次调用不应有 stream_options
+        assert "stream_options" not in captured_kwargs[1]
+        # 最终成功返回
+        assert call_count == 2
+        assert isinstance(events[0], TextDelta)
+        assert events[0].text == "降级成功"
+
+    async def test_stream_options_not_removed_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """非流式请求不添加 stream_options，无需降级。"""
+        provider = OpenAICompatProvider(_provider_config())
+
+        resp = {
+            "id": "c1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "非流式回复"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }
+
+        captured_kwargs: list[dict[str, Any]] = []
+
+        async def _mock_create_completion(**kwargs: Any) -> Any:
+            captured_kwargs.append(dict(kwargs))
+            # 直接返回非流式响应对象
+            return _MockNonStreamResponse(resp)
+
+        monkeypatch.setattr(provider, "_create_completion", _mock_create_completion)
+
+        events = await _collect(
+            provider.chat([Message(role="user", content="hi")], stream=False)
+        )
+
+        # 非流式请求不应有 stream_options
+        assert "stream_options" not in captured_kwargs[0]
+        assert isinstance(events[1], TextDelta)
+        assert events[1].text == "非流式回复"
+
+    # ------------------------------------------------------------------
+    # 3. Anthropic content-block 架构处理
+    # ------------------------------------------------------------------
+
+    def test_anthropic_text_only_content_blocks(self) -> None:
+        """Anthropic 纯文本消息：content 为单个 text block 列表。"""
+        provider = AnthropicProvider(_anthropic_config())
+        result = provider.format_assistant_message("纯文本回复", [])
+        assert result["role"] == "assistant"
+        assert len(result["content"]) == 1
+        assert result["content"][0] == {"type": "text", "text": "纯文本回复"}
+
+    def test_anthropic_tool_use_only_content_blocks(self) -> None:
+        """Anthropic 仅工具调用（空文本）：content 不含 text block。"""
+        provider = AnthropicProvider(_anthropic_config())
+        calls = [ToolCall(id="toolu_1", name="run", arguments={"cmd": "ls"})]
+        result = provider.format_assistant_message("", calls)
+        assert result["role"] == "assistant"
+        # 空文本不产生 text block
+        text_blocks = [b for b in result["content"] if b["type"] == "text"]
+        assert len(text_blocks) == 0
+        tool_blocks = [b for b in result["content"] if b["type"] == "tool_use"]
+        assert len(tool_blocks) == 1
+        assert tool_blocks[0]["id"] == "toolu_1"
+        assert tool_blocks[0]["input"] == {"cmd": "ls"}
+
+    def test_anthropic_mixed_content_blocks(self) -> None:
+        """Anthropic 文本 + 工具调用：content 含 text + tool_use blocks。"""
+        provider = AnthropicProvider(_anthropic_config())
+        calls = [
+            ToolCall(id="toolu_1", name="search", arguments={"q": "a"}),
+            ToolCall(id="toolu_2", name="run", arguments={"cmd": "ls"}),
+        ]
+        result = provider.format_assistant_message("执行两个工具", calls)
+        assert result["role"] == "assistant"
+        # 1 text + 2 tool_use = 3 blocks
+        assert len(result["content"]) == 3
+        assert result["content"][0]["type"] == "text"
+        assert result["content"][1]["type"] == "tool_use"
+        assert result["content"][2]["type"] == "tool_use"
+        # 验证 input 是 dict（非 JSON 字符串）
+        assert isinstance(result["content"][1]["input"], dict)
+        assert isinstance(result["content"][2]["input"], dict)
+
+    # ------------------------------------------------------------------
+    # 4. ToolCall 解析差异
+    # ------------------------------------------------------------------
+
+    async def test_openai_tool_call_arguments_is_json_string(self) -> None:
+        """OpenAI 流式 ToolCall：arguments 是 JSON 字符串，解析后为 dict。"""
+        chunks = [
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "edit_file",
+                                        "arguments": "",
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": '{"path": "/tmp/f.txt", "content": "hello"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+        with respx.mock:
+            respx.post(_DEEPSEEK_URL).mock(
+                return_value=_sse_response(_openai_sse(chunks))
+            )
+            provider = OpenAICompatProvider(_provider_config())
+            events = await _collect(
+                provider.chat([Message(role="user", content="编辑文件")])
+            )
+        tool_calls = [e for e in events if isinstance(e, ToolCall)]
+        assert len(tool_calls) == 1
+        # arguments 应被解析为 dict（原始为 JSON 字符串）
+        assert tool_calls[0].arguments == {"path": "/tmp/f.txt", "content": "hello"}
+        assert isinstance(tool_calls[0].arguments, dict)
+
+    async def test_anthropic_tool_call_input_is_dict(self) -> None:
+        """Anthropic 流式 ToolCall：input_json_delta 累积后解析为 dict。"""
+        events_data = [
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": "claude-3",
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 5, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "edit_file",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"path": '},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '"/tmp/f.txt", "content": "hello"}',
+                    },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use"},
+                    "usage": {"output_tokens": 10},
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+        with respx.mock:
+            respx.post(_ANTHROPIC_URL).mock(
+                return_value=_sse_response(_anthropic_sse(events_data))
+            )
+            provider = AnthropicProvider(_anthropic_config())
+            events = await _collect(
+                provider.chat([Message(role="user", content="编辑文件")])
+            )
+        tool_calls = [e for e in events if isinstance(e, ToolCall)]
+        assert len(tool_calls) == 1
+        # Anthropic 的 input 直接是 dict
+        assert tool_calls[0].arguments == {"path": "/tmp/f.txt", "content": "hello"}
+        assert isinstance(tool_calls[0].arguments, dict)
+
+    async def test_tool_call_parsing_difference_side_by_side(self) -> None:
+        """对比两种 Provider 对相同工具调用的解析结果一致性。
+
+        虽然 wire 格式不同（OpenAI: JSON 字符串, Anthropic: dict），
+        但最终解析出的 ToolCall.arguments 应为相同的 dict。
+        """
+        # OpenAI 侧：arguments 为 JSON 字符串
+        openai_chunks = [
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "read", "arguments": ""},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '{"file": "a.py"}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+        # Anthropic 侧：input_json_delta 累积
+        anthropic_events = [
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": "claude-3",
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 5, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "read",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"file": "a.py"}'},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use"},
+                    "usage": {"output_tokens": 5},
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+
+        with respx.mock:
+            respx.post(_DEEPSEEK_URL).mock(
+                return_value=_sse_response(_openai_sse(openai_chunks))
+            )
+            openai_provider = OpenAICompatProvider(_provider_config())
+            openai_events = await _collect(
+                openai_provider.chat([Message(role="user", content="读文件")])
+            )
+
+        with respx.mock:
+            respx.post(_ANTHROPIC_URL).mock(
+                return_value=_sse_response(_anthropic_sse(anthropic_events))
+            )
+            anthropic_provider = AnthropicProvider(_anthropic_config())
+            anthropic_events = await _collect(
+                anthropic_provider.chat([Message(role="user", content="读文件")])
+            )
+
+        openai_tc = [e for e in openai_events if isinstance(e, ToolCall)][0]
+        anthropic_tc = [e for e in anthropic_events if isinstance(e, ToolCall)][0]
+
+        # 两种 Provider 解析出的 arguments 应一致
+        assert openai_tc.arguments == anthropic_tc.arguments
+        assert openai_tc.arguments == {"file": "a.py"}
+        # name 也应一致
+        assert openai_tc.name == anthropic_tc.name == "read"

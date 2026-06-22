@@ -41,7 +41,8 @@ temp.md
 .codepilot.yml
 .codepilot/
 .codepilot_cache/
-codepilot-log-*.md
+codepilot-session-*.md
+codepilot-session-*.json
 test_website/
 flask_demo/
 portfolio_site/

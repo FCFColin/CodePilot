@@ -880,7 +880,9 @@ class App:
         ext = "md" if fmt == "markdown" else "json"
         session_id = record.get("session_id", "unknown")
         file_name = f"codepilot-session-{session_id}.{ext}"
-        file_path = Path.cwd() / file_name
+        export_dir = Path(os.path.expanduser("~")) / ".codepilot" / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        file_path = export_dir / file_name
 
         try:
             if fmt == "markdown":

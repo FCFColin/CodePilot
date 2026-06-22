@@ -130,3 +130,120 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert "可用命令" in result.stdout or "Help" in result.stdout
+
+    def test_pipe_slash_commands(self) -> None:
+        """管道输入多个 slash 命令后 /quit 正常退出且输出包含关键信息。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/config\n/stats\n/providers\n/plan\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_model_command(self) -> None:
+        """管道输入 /model 和 /model test-model 后正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/model\n/model test-model\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_provider_command(self) -> None:
+        """管道输入 /provider 和 /provider deepseek 后正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/provider\n/provider deepseek\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_approve_command(self) -> None:
+        """管道输入 /approve 后正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/approve\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_rollback_no_arg(self) -> None:
+        """管道输入 /rollback（无参数）输出包含用法提示。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/rollback\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert "用法" in result.stdout or "usage" in result.stdout.lower() or "参数" in result.stdout
+
+    def test_pipe_undo_no_ops(self) -> None:
+        """管道输入 /undo（无操作可撤销）正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/undo\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_export_command(self) -> None:
+        """管道输入 /export markdown 后 /quit 正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/export markdown\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_clear_command(self) -> None:
+        """管道输入 /clear 后 /quit 正常退出。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/clear\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+
+    def test_pipe_unknown_command(self) -> None:
+        """管道输入 /unknown 后 /quit 输出包含"未知命令"。"""
+        env = _env_with_api_key(_DUMMY_API_KEY)
+        result = subprocess.run(
+            ["codepilot"],
+            input="/unknown\n/quit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert "未知命令" in result.stdout

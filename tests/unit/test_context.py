@@ -474,3 +474,143 @@ class TestContextCompressor:
             assert "timestamp" in record
             assert "role" in record
             assert "content" in record
+
+
+# ============================================================================
+# TestCompressionStrategies：压缩策略专项测试
+# ============================================================================
+
+
+class TestCompressionStrategies:
+    """压缩策略专项测试。
+
+    覆盖：
+    - summary 策略的压缩触发（token 使用量超过阈值时）
+    - truncate 策略的压缩（直接丢弃最早消息）
+    - preserve_recent_turns 保留最近N轮
+    - force_compress 手动触发压缩
+    - 压缩后 token 数减少
+    """
+
+    async def test_summary_triggers_on_threshold(self) -> None:
+        """summary 策略：token 使用量超过阈值时触发压缩。"""
+        counter = TokenCounter()
+        provider = MockProvider(response="摘要内容")
+        compressor = ContextCompressor(
+            provider=provider,
+            token_counter=counter,
+            strategy="summary",
+            save_full_history=False,
+        )
+        config = _make_config(
+            max_tokens=100,
+            compression_threshold=0.5,
+            critical_threshold=0.9,
+            preserve_recent_turns=1,
+        )
+        manager = ContextManager(config, counter, compressor=compressor)
+        # 添加足够多的消息以超过阈值
+        await _add_turns(manager, 5)
+        # 触发压缩检查
+        stats = await manager.maybe_compress()
+        assert stats is not None
+        assert stats["strategy"] == "summary"
+        assert provider.call_count >= 1
+        # 压缩后应有摘要
+        assert manager.compressed_summary != ""
+
+    async def test_truncate_discards_earliest_messages(self) -> None:
+        """truncate 策略：直接丢弃最早消息，仅保留最近N轮。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="truncate",
+            save_full_history=False,
+        )
+        messages: list[Message] = [
+            Message(role="user", content="最早问题"),
+            Message(role="assistant", content="最早回答"),
+            Message(role="user", content="中间问题"),
+            Message(role="assistant", content="中间回答"),
+            Message(role="user", content="最近问题"),
+            Message(role="assistant", content="最近回答"),
+        ]
+        summary, stats = await compressor.compress(messages, preserve_recent_turns=1)
+        # 应丢弃前 2 轮（4 条消息），保留最后 1 轮
+        assert stats["messages_compressed"] == 4
+        assert stats["strategy"] == "truncate"
+        assert "truncated" in summary.lower()
+        # 最早的消息内容不应出现在摘要中
+        assert "最早问题" not in summary
+
+    async def test_preserve_recent_turns_keeps_n(self) -> None:
+        """preserve_recent_turns 保留最近N轮对话。"""
+        counter = TokenCounter()
+        compressor = ContextCompressor(
+            token_counter=counter,
+            strategy="truncate",
+            save_full_history=False,
+        )
+        # 5 轮对话
+        messages: list[Message] = []
+        for i in range(5):
+            messages.append(Message(role="user", content=f"问题 {i}"))
+            messages.append(Message(role="assistant", content=f"回答 {i}"))
+
+        # preserve_recent_turns=3 → 保留最后 3 轮（6 条），压缩前 2 轮（4 条）
+        summary, stats = await compressor.compress(messages, preserve_recent_turns=3)
+        assert stats["messages_compressed"] == 4
+        assert summary != ""
+
+        # preserve_recent_turns=5 → 全部保留，无可压缩区
+        summary2, stats2 = await compressor.compress(messages, preserve_recent_turns=5)
+        assert stats2["messages_compressed"] == 0
+        assert summary2 == ""
+
+        # preserve_recent_turns=0 → 全部可压缩
+        summary3, stats3 = await compressor.compress(messages, preserve_recent_turns=0)
+        assert stats3["messages_compressed"] == 10
+
+    async def test_force_compress_with_provider(self) -> None:
+        """force_compress 手动触发压缩（有 provider 时使用 summary 策略）。"""
+        counter = TokenCounter()
+        provider = MockProvider(response="手动压缩摘要")
+        compressor = ContextCompressor(
+            provider=provider,
+            token_counter=counter,
+            strategy="summary",
+            save_full_history=False,
+        )
+        config = _make_config(preserve_recent_turns=1)
+        manager = ContextManager(config, counter, compressor=compressor)
+        await _add_turns(manager, 3)
+        # 手动触发压缩
+        stats = await manager.force_compress()
+        assert stats["messages_compressed"] > 0
+        assert stats["strategy"] == "summary"
+        assert manager.compressed_summary != ""
+        assert manager.get_stats()["compression_count"] == 1
+        # provider 应被调用
+        assert provider.call_count >= 1
+
+    async def test_token_count_decreases_after_compression(self) -> None:
+        """压缩后 token 数应减少。"""
+        counter = TokenCounter()
+        config = _make_config(
+            max_tokens=100,
+            compression_threshold=0.5,
+            critical_threshold=0.9,
+            preserve_recent_turns=1,
+        )
+        manager = ContextManager(config, counter, compressor=None)
+        # 添加大量消息使 token 数很高
+        await _add_turns(manager, 5)
+        tokens_before = manager.total_tokens
+        # 触发压缩
+        stats = await manager.maybe_compress()
+        assert stats is not None
+        tokens_after = manager.total_tokens
+        # 压缩后 token 数应少于压缩前
+        assert tokens_after < tokens_before
+        # stats 也应反映减少
+        assert stats["after_tokens"] < stats["before_tokens"]

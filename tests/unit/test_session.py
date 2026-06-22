@@ -238,7 +238,7 @@ class TestSessionManager:
         assert msgs[0]["content"] == ""
 
     def test_session_auto_export_log(self, tmp_path: Path) -> None:
-        """save 后工作目录存在 codepilot-log-{session_id}.md 文件。"""
+        """save 后 ~/.codepilot/logs/ 目录存在 codepilot-log-{session_id}.md 文件。"""
         storage = SessionStorage(sessions_dir=tmp_path / "sessions")
         manager = SessionManager(
             storage=storage,
@@ -250,7 +250,7 @@ class TestSessionManager:
         manager.add_message("user", "hello")
         manager.save()
 
-        log_path = tmp_path / f"codepilot-log-{session_id}.md"
+        log_path = Path.home() / ".codepilot" / "logs" / f"codepilot-log-{session_id}.md"
         assert log_path.exists()
         content = log_path.read_text(encoding="utf-8")
         assert "hello" in content

@@ -616,6 +616,43 @@ class TestUndoTracker:
         assert undone == 0  # file2 恢复失败
         assert failed == 1
 
+    def test_undo_to_turn_multi_turn(self, tmp_path: Path) -> None:
+        """多轮操作后回退到第1轮，验证后续轮次的文件变更被撤销。"""
+        tracker = UndoTracker()
+        # 第 1 轮：创建 file1
+        tracker.mark_turn_start()
+        file1 = tmp_path / "file1.txt"
+        file1.write_text("content1", encoding="utf-8")
+        tracker._stack.append((str(file1), None))
+        # 第 2 轮：修改 file1 并创建 file2
+        tracker.mark_turn_start()
+        file1.write_text("modified1", encoding="utf-8")
+        tracker._stack.append((str(file1), "content1"))
+        file2 = tmp_path / "file2.txt"
+        file2.write_text("content2", encoding="utf-8")
+        tracker._stack.append((str(file2), None))
+        # 第 3 轮：修改 file2 并创建 file3
+        tracker.mark_turn_start()
+        file2.write_text("modified2", encoding="utf-8")
+        tracker._stack.append((str(file2), "content2"))
+        file3 = tmp_path / "file3.txt"
+        file3.write_text("content3", encoding="utf-8")
+        tracker._stack.append((str(file3), None))
+
+        # 回退到第 1 轮：撤销第 2、3 轮共 4 个文件操作
+        undone, failed = tracker.undo_to_turn(1)
+        assert undone == 4
+        assert failed == 0
+        # 第 1 轮的文件保留，内容恢复为创建时的状态
+        assert file1.exists()
+        assert file1.read_text(encoding="utf-8") == "content1"
+        # 第 2、3 轮创建的文件被删除
+        assert not file2.exists()
+        assert not file3.exists()
+        # 栈和轮次边界截断到第 1 轮
+        assert len(tracker._stack) == 1
+        assert tracker._turn_boundaries == [0]
+
 
 # ============================================================================
 # TestTrackedToolWrapper
@@ -733,41 +770,44 @@ class TestSessionIntegration:
     async def test_slash_export_markdown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """/export markdown 导出会话到 .md 文件。"""
-        monkeypatch.chdir(tmp_path)
+        """/export markdown 导出会话到 ~/.codepilot/exports/ 目录。"""
         config = _make_config(tmp_path)
         app = App(config)
         app.session_manager.add_message("user", "export test")
         result = await app._handle_slash_command("/export markdown")
         assert result is False
-        # 验证文件存在
-        exported_files = list(tmp_path.glob("codepilot-session-*.md"))
-        assert len(exported_files) == 1
+        # 验证文件存在于 ~/.codepilot/exports/
+        export_dir = Path.home() / ".codepilot" / "exports"
+        session_id = app.session_manager.get_record()["session_id"]
+        export_path = export_dir / f"codepilot-session-{session_id}.md"
+        assert export_path.exists()
 
     async def test_slash_export_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """/export json 导出会话到 .json 文件。"""
-        monkeypatch.chdir(tmp_path)
+        """/export json 导出会话到 ~/.codepilot/exports/ 目录。"""
         config = _make_config(tmp_path)
         app = App(config)
         app.session_manager.add_message("user", "json export test")
         result = await app._handle_slash_command("/export json")
         assert result is False
-        exported_files = list(tmp_path.glob("codepilot-session-*.json"))
-        assert len(exported_files) == 1
+        export_dir = Path.home() / ".codepilot" / "exports"
+        session_id = app.session_manager.get_record()["session_id"]
+        export_path = export_dir / f"codepilot-session-{session_id}.json"
+        assert export_path.exists()
 
     async def test_slash_export_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """/export 无参数默认导出 markdown。"""
-        monkeypatch.chdir(tmp_path)
         config = _make_config(tmp_path)
         app = App(config)
         result = await app._handle_slash_command("/export")
         assert result is False
-        exported_files = list(tmp_path.glob("codepilot-session-*.md"))
-        assert len(exported_files) == 1
+        export_dir = Path.home() / ".codepilot" / "exports"
+        session_id = app.session_manager.get_record()["session_id"]
+        export_path = export_dir / f"codepilot-session-{session_id}.md"
+        assert export_path.exists()
 
     async def test_slash_export_invalid_format(self, tmp_path: Path) -> None:
         """/export 无效格式返回 False 且不导出。"""
